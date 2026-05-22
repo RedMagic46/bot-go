@@ -4,18 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	nethttp "net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-	nethttp "net/http"
 
+	"github.com/PuerkitoBio/goquery"
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
-	"github.com/PuerkitoBio/goquery"
 	"github.com/joho/godotenv"
 )
 
@@ -128,7 +128,7 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 		return nil, err
 	}
 
-	req.Header.Set("User-Agent", USER_AGENT) 
+	req.Header.Set("User-Agent", USER_AGENT)
 	req.Header.Set("Cookie", cookieHeader)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
@@ -175,12 +175,12 @@ func runBot() {
 	fmt.Println("🔑 Cookies : Dimuat dengan sukses.")
 	fmt.Printf("🕒 Mulai   : %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	// Setup Engine Impersonate TLS untuk membodohi Cloudflare 
+	// Setup Engine Impersonate TLS untuk membodohi Cloudflare
 	// Karena cookie Anda berasal dari Firefox, kita harus menyamar menjadi Firefox!
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(30),
 		tls_client.WithClientProfile(profiles.Firefox_132),
-		tls_client.WithNotFollowRedirects(), 
+		tls_client.WithNotFollowRedirects(),
 	}
 
 	client, err := tls_client.NewHttpClient(tls_client.NewLogger(), options...)
@@ -254,13 +254,15 @@ func runBot() {
 		wg.Add(1)
 		go func(idx int, targetLink string) {
 			defer wg.Done()
-			
+
 			fmt.Printf("\n🔄 [%d/%d] Membuka halaman presensi...\n", idx+1, len(presenceLinks))
-			
+
 			pResp, pErr := makeRequest(client, targetLink, cookieHeader)
 			if pErr != nil || pResp.StatusCode != 200 {
 				fmt.Printf("   ❌ [%d] Gagal memuat detail presensi.\n", idx+1)
-				if pResp != nil { pResp.Body.Close() }
+				if pResp != nil {
+					pResp.Body.Close()
+				}
 				return
 			}
 
@@ -294,21 +296,37 @@ func runBot() {
 			// Parse Table Headers Dinamis
 			var headers []string
 			hadirIdx, aksiIdx, mulaiIdx, selesaiIdx := -1, -1, -1, -1
-			
+
 			pDoc.Find("table thead th").Each(func(hIdx int, s *goquery.Selection) {
 				hText := strings.ToLower(strings.TrimSpace(s.Text()))
 				headers = append(headers, hText)
-				if strings.Contains(hText, "hadir") { hadirIdx = hIdx }
-				if strings.Contains(hText, "aksi") { aksiIdx = hIdx }
-				if strings.Contains(hText, "mulai") { mulaiIdx = hIdx }
-				if strings.Contains(hText, "selesai") { selesaiIdx = hIdx }
+				if strings.Contains(hText, "hadir") {
+					hadirIdx = hIdx
+				}
+				if strings.Contains(hText, "aksi") {
+					aksiIdx = hIdx
+				}
+				if strings.Contains(hText, "mulai") {
+					mulaiIdx = hIdx
+				}
+				if strings.Contains(hText, "selesai") {
+					selesaiIdx = hIdx
+				}
 			})
 
 			// Jika tidak ketemu, pakai default index
-			if hadirIdx == -1 { hadirIdx = 5 }
-			if aksiIdx == -1 { aksiIdx = 6 }
-			if mulaiIdx == -1 { mulaiIdx = 3 }
-			if selesaiIdx == -1 { selesaiIdx = 4 }
+			if hadirIdx == -1 {
+				hadirIdx = 5
+			}
+			if aksiIdx == -1 {
+				aksiIdx = 6
+			}
+			if mulaiIdx == -1 {
+				mulaiIdx = 3
+			}
+			if selesaiIdx == -1 {
+				selesaiIdx = 4
+			}
 
 			alreadyVCount := 0
 			var buttonsToClick []map[string]string
@@ -322,7 +340,7 @@ func runBot() {
 
 				hadirText := strings.ToLower(strings.TrimSpace(tds.Eq(hadirIdx).Text()))
 				aksiLink := ""
-				
+
 				tds.Eq(aksiIdx).Find("a").Each(func(_ int, a *goquery.Selection) {
 					href, exists := a.Attr("href")
 					if exists && strings.Contains(href, "/proses/") {
@@ -378,7 +396,7 @@ func runBot() {
 
 			for _, btn := range buttonsToClick {
 				fmt.Printf("   ⚡ [%d] Mengirim request presensi untuk baris %s...\n", idx+1, btn["rIdx"])
-				
+
 				aResp, aErr := makeRequest(client, btn["link"], cookieHeader)
 				if aErr != nil {
 					fmt.Printf("   ❌ [%d] Error saat klik presensi.\n", idx+1)
@@ -400,7 +418,7 @@ func runBot() {
 				}
 				successMsg = append(successMsg, fmt.Sprintf("• %s%s", courseName, waktuInfo))
 			}
-			
+
 			if clickCount > 0 {
 				mu.Lock()
 				totalSuccess += clickCount
@@ -423,12 +441,12 @@ func runBot() {
 }
 
 func main() {
-	// Jalankan bot pertama kali dan kemudian setiap 10 detik
+	// Jalankan bot pertama kali dan kemudian setiap 1 detik
 	go func() {
 		for {
 			runBot()
 			fmt.Println("\n⏳ Menunggu 10 detik sebelum pengecekan berikutnya...")
-			time.Sleep(10 * time.Second)
+			time.Sleep(1 * time.Second)
 		}
 	}()
 
