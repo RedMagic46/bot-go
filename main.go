@@ -435,7 +435,7 @@ func runBot() {
 	fmt.Println("==================================================")
 
 	if totalSuccess > 0 && len(matkulBerhasil) > 0 {
-		pesan := fmt.Sprintf("Presensi\n%s\nbang", strings.Join(matkulBerhasil, "\n"))
+		pesan := fmt.Sprintf("Presensi\n%s\n", strings.Join(matkulBerhasil, "\n"))
 		sendWhatsApp(pesan)
 	}
 }
@@ -445,7 +445,7 @@ func main() {
 	go func() {
 		for {
 			runBot()
-			fmt.Println("\n⏳ Menunggu 10 detik sebelum pengecekan berikutnya...")
+			fmt.Println("\n⏳ Menunggu 1 detik sebelum pengecekan berikutnya...")
 			time.Sleep(1 * time.Second)
 		}
 	}()
