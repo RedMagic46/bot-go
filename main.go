@@ -452,8 +452,8 @@ func main() {
 			// Hanya berjalan dari jam 07:00 sampai 20:59 WIB (di bawah jam 21:00)
 			if hour >= 7 && hour < 21 {
 				runBot()
-				fmt.Println("\n⏳ Menunggu 1 menit sebelum pengecekan berikutnya...")
-				time.Sleep(1 * time.Minute)
+				fmt.Println("\n⏳ Menunggu 1 detik sebelum pengecekan berikutnya...")
+				time.Sleep(1 * time.Second)
 			} else {
 				fmt.Printf("\n😴 [%s WIB] Di luar jam aktif (07:00 - 21:00 WIB). Bot tidur, cek kembali dalam 10 menit...\n", now.Format("15:04:05"))
 				// Saat tidur, cukup cek setiap 10 menit agar hemat resource
