@@ -441,12 +441,24 @@ func runBot() {
 }
 
 func main() {
-	// Jalankan bot pertama kali dan kemudian setiap 1 detik
+	// Jalankan bot pertama kali dan kemudian secara berkala
 	go func() {
 		for {
-			runBot()
-			fmt.Println("\n⏳ Menunggu 1 detik sebelum pengecekan berikutnya...")
-			time.Sleep(1 * time.Second)
+			// Menggunakan timezone WIB (Asia/Jakarta = UTC+7)
+			loc := time.FixedZone("WIB", 7*60*60)
+			now := time.Now().In(loc)
+			hour := now.Hour()
+
+			// Hanya berjalan dari jam 07:00 sampai 20:59 WIB (di bawah jam 21:00)
+			if hour >= 7 && hour < 21 {
+				runBot()
+				fmt.Println("\n⏳ Menunggu 1 menit sebelum pengecekan berikutnya...")
+				time.Sleep(1 * time.Minute)
+			} else {
+				fmt.Printf("\n😴 [%s WIB] Di luar jam aktif (07:00 - 21:00 WIB). Bot tidur, cek kembali dalam 10 menit...\n", now.Format("15:04:05"))
+				// Saat tidur, cukup cek setiap 10 menit agar hemat resource
+				time.Sleep(10 * time.Minute)
+			}
 		}
 	}()
 
