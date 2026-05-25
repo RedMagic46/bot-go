@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	nethttp "net/http"
 	"net/url"
@@ -45,15 +46,15 @@ func sendWhatsApp(message string) {
 		return
 	}
 
-	client := &http.Client{}
+	client := &nethttp.Client{}
 	data := url.Values{}
 	data.Set("target", WA_GROUP)
 	data.Set("message", message)
 	data.Set("delay", "1")
 
-	req, err := http.NewRequest("POST", "https://api.fonnte.com/send", strings.NewReader(data.Encode()))
+	req, err := nethttp.NewRequest("POST", "https://api.fonnte.com/send", strings.NewReader(data.Encode()))
 	if err != nil {
-		fmt.Printf("Error membuat request WA: %v\n", err)
+		fmt.Printf("❌ Error membuat request WA: %v\n", err)
 		return
 	}
 	req.Header.Set("Authorization", WA_TOKEN)
@@ -61,11 +62,28 @@ func sendWhatsApp(message string) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("Error mengirim WhatsApp: %v\n", err)
+		fmt.Printf("❌ Error mengirim WhatsApp: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
-	fmt.Println("Pesan WhatsApp berhasil dikirim.")
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("❌ Pesan WhatsApp terkirim, tetapi gagal membaca respon: %v\n", err)
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err == nil {
+		if status, ok := result["status"].(bool); ok && status {
+			fmt.Println("\n🎉 BERHASIL! Pesan WhatsApp sukses dikirim.")
+			fmt.Printf("📋 Detail Respon:\n%s\n", string(body))
+		} else {
+			fmt.Printf("\n❌ Gagal mengirim pesan! Respon:\n%s\n", string(body))
+		}
+	} else {
+		fmt.Printf("\n⚠️ Respon mentah pengiriman:\n%s\n", string(body))
+	}
 }
 
 // Fungsi muat Cookie
