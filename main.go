@@ -170,7 +170,6 @@ func runBot() {
 	fmt.Println("🚀 UMM INFOKHS API BOT - GOLANG EDITION (ULTRA FAST)")
 	fmt.Println("============================================================")
 
-	// Load dari file env (folder parent atau saat ini)
 	godotenv.Load("../.env")
 	godotenv.Load(".env")
 
@@ -408,7 +407,6 @@ func runBot() {
 
 			fmt.Printf("   🔥 [%d] Ditemukan %d tombol presensi AKTIF!\n", idx+1, len(buttonsToClick))
 
-			// Eksekusi Klik Hadir!
 			clickCount := 0
 			var successMsg []string
 
