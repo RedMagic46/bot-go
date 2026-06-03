@@ -1,0 +1,16 @@
+# Local database files containing credentials
+profiles.json
+config.json
+
+# Local env files
+.env
+.env.local
+
+# Compiled binaries
+bot-presensi
+bot-presensi.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib

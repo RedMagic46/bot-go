@@ -9,7 +9,7 @@ RUN go mod download
 RUN go get -d -v ./...
 
 # Salin source code
-COPY main.go ./
+COPY . .
 
 # Build aplikasi Go menjadi single binary bernama 'bot-presensi'
 RUN CGO_ENABLED=0 GOOS=linux go build -o bot-presensi main.go

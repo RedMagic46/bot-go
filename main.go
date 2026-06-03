@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,15 +21,36 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Embed frontend static files
+//go:embed static/*
+var staticFS embed.FS
+
 var (
-	NIM        string
-	WA_TOKEN   string
-	WA_GROUP   string
 	URL_JADWAL = "https://infokhs.umm.ac.id/jadwal-kuliah"
 	USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-// Struktur Cookie untuk parsing JSON
+// Data Models
+type Profile struct {
+	NIM           string    `json:"nim"`
+	Name          string    `json:"name"`
+	CookiesJSON   string    `json:"cookies_json"`
+	WAToken       string    `json:"wa_token"`
+	WAGroup       string    `json:"wa_group"`
+	IsActive      bool      `json:"is_active"`
+	LastRunStatus string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", or ""
+	LastRunTime   time.Time `json:"last_run_time"`
+	LastRunMsg    string    `json:"last_run_msg"`
+}
+
+type GlobalConfig struct {
+	WAToken       string `json:"wa_token"`
+	WAGroup       string `json:"wa_group"`
+	CheckInterval int    `json:"check_interval"` // in minutes
+	StartHour     int    `json:"start_hour"`
+	EndHour       int    `json:"end_hour"`
+}
+
 type CookieItem struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -39,114 +61,226 @@ type CookieJSON struct {
 	Cookies   []CookieItem `json:"cookies"`
 }
 
-// Fungsi kirim WA menggunakan API Fonnte
-func sendWhatsApp(message string) {
-	if WA_TOKEN == "" || WA_GROUP == "" {
-		fmt.Println("WA_TOKEN atau WA_GROUP belum diatur. Melewati pengiriman WhatsApp.")
+// In-Memory Database & Mutexes
+var (
+	studentProfilesMutex sync.RWMutex
+	studentProfiles      []Profile
+
+	configMutex  sync.RWMutex
+	globalConfig = GlobalConfig{
+		CheckInterval: 5,
+		StartHour:     7,
+		EndHour:       21,
+	}
+)
+
+// Log System
+type LogMessage struct {
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"` // "info", "success", "warning", "error", "system"
+	Message   string    `json:"message"`
+}
+
+var (
+	logCache   []LogMessage
+	logMutex   sync.Mutex
+	listeners  = make(map[chan LogMessage]bool)
+	listenerMu sync.Mutex
+)
+
+func AddLog(level, format string, v ...interface{}) {
+	msg := fmt.Sprintf(format, v...)
+	logMsg := LogMessage{
+		Timestamp: time.Now(),
+		Level:     level,
+		Message:   msg,
+	}
+
+	// Print to Stdout
+	prefix := "ℹ️ "
+	switch level {
+	case "success":
+		prefix = "🎉 "
+	case "warning":
+		prefix = "⚠️ "
+	case "error":
+		prefix = "❌ "
+	case "system":
+		prefix = "⚙️ "
+	}
+	fmt.Printf("[%s] %s%s\n", logMsg.Timestamp.Format("15:04:05"), prefix, msg)
+
+	logMutex.Lock()
+	logCache = append(logCache, logMsg)
+	if len(logCache) > 500 { // Keep last 500 logs
+		logCache = logCache[1:]
+	}
+	logMutex.Unlock()
+
+	// Broadcast to SSE clients
+	listenerMu.Lock()
+	for ch := range listeners {
+		select {
+		case ch <- logMsg:
+		default:
+		}
+	}
+	listenerMu.Unlock()
+}
+
+// Database Operations
+func loadData() {
+	// Try loading config
+	cfgData, err := os.ReadFile("config.json")
+	if err == nil {
+		json.Unmarshal(cfgData, &globalConfig)
+	} else {
+		// Migrate legacy env values
+		globalConfig.WAToken = os.Getenv("WA_TOKEN")
+		globalConfig.WAGroup = os.Getenv("WA_GROUP")
+		saveConfig()
+	}
+
+	// Try loading profiles
+	profData, err := os.ReadFile("profiles.json")
+	if err == nil {
+		json.Unmarshal(profData, &studentProfiles)
+	} else {
+		// Migrate legacy env single NIM profile
+		legacyNIM := os.Getenv("NIM")
+		if legacyNIM != "" {
+			legacyCookies := os.Getenv("COOKIES_JSON")
+			if legacyCookies == "" {
+				cookieFile := filepath.Join(".", "cookies_umm.json")
+				if _, err := os.Stat(cookieFile); os.IsNotExist(err) {
+					cookieFile = filepath.Join("..", "cookies_umm.json")
+				}
+				data, err := os.ReadFile(cookieFile)
+				if err == nil {
+					legacyCookies = string(data)
+				}
+			}
+			if legacyCookies != "" {
+				studentProfiles = append(studentProfiles, Profile{
+					NIM:      legacyNIM,
+					Name:     "Default Profile (Migrated)",
+					CookiesJSON: legacyCookies,
+					IsActive: true,
+				})
+				saveStudentProfiles()
+				AddLog("system", "Berhasil migrasi profil bawaan Env dari NIM %s.", legacyNIM)
+			}
+		}
+	}
+}
+
+func saveStudentProfiles() {
+	data, _ := json.MarshalIndent(studentProfiles, "", "  ")
+	os.WriteFile("profiles.json", data, 0644)
+}
+
+func saveConfig() {
+	data, _ := json.MarshalIndent(globalConfig, "", "  ")
+	os.WriteFile("config.json", data, 0644)
+}
+
+// Cookie Helper
+func parseCookies(cookieInput string) (string, string) {
+	var userAgent = USER_AGENT
+	var cookieString string
+
+	cookieInput = strings.TrimSpace(cookieInput)
+	if cookieInput == "" {
+		return "", userAgent
+	}
+
+	// Try parsing CookieJSON
+	var cj CookieJSON
+	if err := json.Unmarshal([]byte(cookieInput), &cj); err == nil && len(cj.Cookies) > 0 {
+		if cj.UserAgent != "" {
+			userAgent = cj.UserAgent
+		}
+		var pairs []string
+		for _, c := range cj.Cookies {
+			pairs = append(pairs, c.Name+"="+c.Value)
+		}
+		cookieString = strings.Join(pairs, "; ")
+		return cookieString, userAgent
+	}
+
+	// Try parsing direct array of CookieItem
+	var cl []CookieItem
+	if err := json.Unmarshal([]byte(cookieInput), &cl); err == nil && len(cl) > 0 {
+		var pairs []string
+		for _, c := range cl {
+			pairs = append(pairs, c.Name+"="+c.Value)
+		}
+		cookieString = strings.Join(pairs, "; ")
+		return cookieString, userAgent
+	}
+
+	// Try parsing raw Header string
+	if strings.Contains(cookieInput, "=") {
+		return cookieInput, userAgent
+	}
+
+	return "", userAgent
+}
+
+// WhatsApp sender
+func sendWhatsApp(message string, waToken, waGroup string) {
+	if waToken == "" || waGroup == "" {
+		AddLog("info", "Pemberitahuan WhatsApp diabaikan (token/group kosong)")
 		return
 	}
 
 	client := &nethttp.Client{}
 	data := url.Values{}
-	data.Set("target", WA_GROUP)
+	data.Set("target", waGroup)
 	data.Set("message", message)
 	data.Set("delay", "1")
 
 	req, err := nethttp.NewRequest("POST", "https://api.fonnte.com/send", strings.NewReader(data.Encode()))
 	if err != nil {
-		fmt.Printf("❌ Error membuat request WA: %v\n", err)
+		AddLog("error", "Gagal membuat request WA: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", WA_TOKEN)
+	req.Header.Set("Authorization", waToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("❌ Error mengirim WhatsApp: %v\n", err)
+		AddLog("error", "Gagal mengirim WhatsApp: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Printf("❌ Pesan WhatsApp terkirim, tetapi gagal membaca respon: %v\n", err)
+		AddLog("error", "Pesan WA terkirim, tetapi gagal membaca respon: %v", err)
 		return
 	}
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err == nil {
 		if status, ok := result["status"].(bool); ok && status {
-			fmt.Println("\n🎉 BERHASIL! Pesan WhatsApp sukses dikirim.")
-			fmt.Printf("📋 Detail Respon:\n%s\n", string(body))
+			AddLog("success", "Notifikasi WhatsApp terkirim ke %s.", waGroup)
 		} else {
-			fmt.Printf("\n❌ Gagal mengirim pesan! Respon:\n%s\n", string(body))
+			AddLog("error", "WhatsApp Fonnte error: %s", string(body))
 		}
 	} else {
-		fmt.Printf("\n⚠️ Respon mentah pengiriman:\n%s\n", string(body))
+		AddLog("warning", "Respon mentah WA: %s", string(body))
 	}
 }
 
-// Fungsi muat Cookie
-func loadCookies() string {
-	envCookies := os.Getenv("COOKIES_JSON")
-	var cookieString string
-
-	parseCookies := func(data []byte) string {
-		var cj CookieJSON
-		if err := json.Unmarshal(data, &cj); err == nil && len(cj.Cookies) > 0 {
-			if cj.UserAgent != "" {
-				USER_AGENT = cj.UserAgent
-			}
-			var pairs []string
-			for _, c := range cj.Cookies {
-				pairs = append(pairs, c.Name+"="+c.Value)
-			}
-			return strings.Join(pairs, "; ")
-		}
-
-		// Fallback jika format array langsung
-		var cl []CookieItem
-		if err := json.Unmarshal(data, &cl); err == nil {
-			var pairs []string
-			for _, c := range cl {
-				pairs = append(pairs, c.Name+"="+c.Value)
-			}
-			return strings.Join(pairs, "; ")
-		}
-		return ""
-	}
-
-	if envCookies != "" {
-		cookieString = parseCookies([]byte(envCookies))
-		if cookieString != "" {
-			return cookieString
-		}
-		fmt.Println("Gagal memuat cookies dari env COOKIES_JSON, mencoba dari file...")
-	}
-
-	// Coba cari cookies_umm.json di current folder, kalau gak ada cari di parent folder
-	cookieFile := filepath.Join(".", "cookies_umm.json")
-	if _, err := os.Stat(cookieFile); os.IsNotExist(err) {
-		cookieFile = filepath.Join("..", "cookies_umm.json")
-	}
-
-	data, err := os.ReadFile(cookieFile)
-	if err != nil {
-		fmt.Printf("❌ Gagal memuat cookies dari file: %v\n", err)
-		return ""
-	}
-
-	return parseCookies(data)
-}
-
-// Fungsi helper request dengan TLS Client (Bypass CF)
-func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader string) (*http.Response, error) {
+// Request Helper
+func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader string, userAgent string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, targetUrl, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Cookie", cookieHeader)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
@@ -165,35 +299,35 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 	return resp, nil
 }
 
-func runBot() {
-	fmt.Println("============================================================")
-	fmt.Println("🚀 UMM INFOKHS API BOT - GOLANG EDITION (ULTRA FAST)")
-	fmt.Println("============================================================")
+// Core Bot Executor
+func runBotForProfile(p *Profile) {
+	AddLog("info", "============================================================")
+	AddLog("info", "🚀 MEMULAI PRESENSI: NIM %s (%s)", p.NIM, p.Name)
+	AddLog("info", "============================================================")
 
-	godotenv.Load("../.env")
-	godotenv.Load(".env")
-
-	NIM = os.Getenv("NIM")
-	WA_TOKEN = os.Getenv("WA_TOKEN")
-	WA_GROUP = os.Getenv("WA_GROUP")
-
-	if NIM == "" {
-		fmt.Println("❌ NIM belum diatur di file .env!")
-		return
-	}
-
-	cookieHeader := loadCookies()
+	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
 	if cookieHeader == "" {
-		fmt.Println("❌ Cookie gagal dimuat. Pastikan cookies_umm.json ada atau COOKIES_JSON terisi.")
+		p.LastRunStatus = "expired"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = "Cookie tidak valid / kosong"
+		AddLog("error", "NIM %s: Cookie kosong atau salah format.", p.NIM)
 		return
 	}
 
-	fmt.Printf("🆔 NIM     : %s\n", NIM)
-	fmt.Println("🔑 Cookies : Dimuat dengan sukses.")
-	fmt.Printf("🕒 Mulai   : %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	// Resolve WA configurations
+	waToken := p.WAToken
+	if waToken == "" {
+		configMutex.RLock()
+		waToken = globalConfig.WAToken
+		configMutex.RUnlock()
+	}
+	waGroup := p.WAGroup
+	if waGroup == "" {
+		configMutex.RLock()
+		waGroup = globalConfig.WAGroup
+		configMutex.RUnlock()
+	}
 
-	// Setup Engine Impersonate TLS untuk membodohi Cloudflare
-	// Karena cookie Anda berasal dari Firefox, kita harus menyamar menjadi Firefox!
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(30),
 		tls_client.WithClientProfile(profiles.Firefox_132),
@@ -202,32 +336,46 @@ func runBot() {
 
 	client, err := tls_client.NewHttpClient(tls_client.NewLogger(), options...)
 	if err != nil {
-		log.Fatalf("Gagal inisialisasi TLS Client: %v", err)
+		p.LastRunStatus = "failed"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = fmt.Sprintf("Gagal init TLS Client: %v", err)
+		AddLog("error", "NIM %s: Gagal inisialisasi client: %v", p.NIM, err)
+		return
 	}
 
-	fmt.Println("🌐 Mengakses halaman jadwal kuliah...")
-	resp, err := makeRequest(client, URL_JADWAL, cookieHeader)
+	AddLog("info", "NIM %s: Mengakses halaman jadwal kuliah...", p.NIM)
+	resp, err := makeRequest(client, URL_JADWAL, cookieHeader, userAgent)
 	if err != nil {
-		fmt.Printf("❌ Gagal request jadwal: %v\n", err)
+		p.LastRunStatus = "failed"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = fmt.Sprintf("Gagal request jadwal: %v", err)
+		AddLog("error", "NIM %s: Gagal memuat jadwal: %v", p.NIM, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 403 {
-		fmt.Println("❌ HTTP Error 403: Forbidden")
-		fmt.Println("⚠️  Terdeteksi blokir Cloudflare. Cookies mungkin salah/expired.")
+		p.LastRunStatus = "expired"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = "Cloudflare memblokir request (HTTP 403)"
+		AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403). Ganti Cookies Anda.", p.NIM)
 		return
 	}
 
 	if resp.StatusCode == 301 || resp.StatusCode == 302 {
-		fmt.Println("⚠️  Sesi Anda telah kedaluwarsa (dialihkan ke halaman login)!")
+		p.LastRunStatus = "expired"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = "Sesi kedaluwarsa (Redirect ke Login)"
+		AddLog("warning", "NIM %s: Sesi kedaluwarsa, silakan update Cookies.", p.NIM)
 		return
 	}
 
-	// Parsing HTML Jadwal
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		fmt.Printf("❌ Gagal parse jadwal HTML: %v\n", err)
+		p.LastRunStatus = "failed"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = fmt.Sprintf("Gagal parse HTML: %v", err)
+		AddLog("error", "NIM %s: Gagal parsing HTML jadwal: %v", p.NIM, err)
 		return
 	}
 
@@ -241,7 +389,7 @@ func runBot() {
 				href = "https://infokhs.umm.ac.id/" + href
 			}
 
-			// Cek duplikasi array
+			// Deduplicate
 			found := false
 			for _, l := range presenceLinks {
 				if l == href {
@@ -255,10 +403,13 @@ func runBot() {
 		}
 	})
 
-	fmt.Printf("📋 Ditemukan %d tautan presensi mata kuliah.\n", len(presenceLinks))
+	AddLog("info", "NIM %s: Ditemukan %d tautan presensi mata kuliah.", p.NIM, len(presenceLinks))
 
 	if len(presenceLinks) == 0 {
-		fmt.Println("⚠️ Tidak ada tautan presensi matkul aktif di jadwal.")
+		p.LastRunStatus = "no_link"
+		p.LastRunTime = time.Now()
+		p.LastRunMsg = "Tidak ada tautan presensi matkul aktif."
+		AddLog("info", "NIM %s: Tidak ada jadwal mata kuliah aktif yang butuh presensi.", p.NIM)
 		return
 	}
 
@@ -272,11 +423,11 @@ func runBot() {
 		go func(idx int, targetLink string) {
 			defer wg.Done()
 
-			fmt.Printf("\n🔄 [%d/%d] Membuka halaman presensi...\n", idx+1, len(presenceLinks))
+			AddLog("info", "NIM %s: [%d/%d] Membuka panel presensi...", p.NIM, idx+1, len(presenceLinks))
 
-			pResp, pErr := makeRequest(client, targetLink, cookieHeader)
+			pResp, pErr := makeRequest(client, targetLink, cookieHeader, userAgent)
 			if pErr != nil || pResp.StatusCode != 200 {
-				fmt.Printf("   ❌ [%d] Gagal memuat detail presensi.\n", idx+1)
+				AddLog("error", "NIM %s: [%d] Gagal memuat halaman detail presensi.", p.NIM, idx+1)
 				if pResp != nil {
 					pResp.Body.Close()
 				}
@@ -286,11 +437,11 @@ func runBot() {
 			pDoc, err := goquery.NewDocumentFromReader(pResp.Body)
 			pResp.Body.Close()
 			if err != nil {
-				fmt.Printf("   ❌ [%d] Gagal parse HTML presensi.\n", idx+1)
+				AddLog("error", "NIM %s: [%d] Gagal parsing detail presensi.", p.NIM, idx+1)
 				return
 			}
 
-			// Ekstrak Nama Mata Kuliah
+			// Scrape Course Name
 			courseName := "Tidak diketahui"
 			pDoc.Find("b, strong").Each(func(_ int, s *goquery.Selection) {
 				text := strings.ToLower(strings.TrimSpace(s.Text()))
@@ -308,47 +459,30 @@ func runBot() {
 				}
 			})
 
-			fmt.Printf("   📚 [%d] Mata Kuliah: %s\n", idx+1, courseName)
+			AddLog("info", "NIM %s: [%d] Matkul: %s", p.NIM, idx+1, courseName)
 
-			// Parse Table Headers Dinamis
+			// Parse Table Headers
 			var headers []string
 			hadirIdx, aksiIdx, mulaiIdx, selesaiIdx := -1, -1, -1, -1
 
 			pDoc.Find("table thead th").Each(func(hIdx int, s *goquery.Selection) {
 				hText := strings.ToLower(strings.TrimSpace(s.Text()))
 				headers = append(headers, hText)
-				if strings.Contains(hText, "hadir") {
-					hadirIdx = hIdx
-				}
-				if strings.Contains(hText, "aksi") {
-					aksiIdx = hIdx
-				}
-				if strings.Contains(hText, "mulai") {
-					mulaiIdx = hIdx
-				}
-				if strings.Contains(hText, "selesai") {
-					selesaiIdx = hIdx
-				}
+				if strings.Contains(hText, "hadir") { hadirIdx = hIdx }
+				if strings.Contains(hText, "aksi") { aksiIdx = hIdx }
+				if strings.Contains(hText, "mulai") { mulaiIdx = hIdx }
+				if strings.Contains(hText, "selesai") { selesaiIdx = hIdx }
 			})
 
-			// Jika tidak ketemu, pakai default index
-			if hadirIdx == -1 {
-				hadirIdx = 5
-			}
-			if aksiIdx == -1 {
-				aksiIdx = 6
-			}
-			if mulaiIdx == -1 {
-				mulaiIdx = 3
-			}
-			if selesaiIdx == -1 {
-				selesaiIdx = 4
-			}
+			if hadirIdx == -1 { hadirIdx = 5 }
+			if aksiIdx == -1 { aksiIdx = 6 }
+			if mulaiIdx == -1 { mulaiIdx = 3 }
+			if selesaiIdx == -1 { selesaiIdx = 4 }
 
 			alreadyVCount := 0
 			var buttonsToClick []map[string]string
 
-			// Cari Tombol Presensi
+			// Locate active presence buttons
 			pDoc.Find("table tbody tr").Each(func(rIdx int, s *goquery.Selection) {
 				tds := s.Find("td")
 				if tds.Length() <= hadirIdx || tds.Length() <= aksiIdx {
@@ -397,35 +531,35 @@ func runBot() {
 			})
 
 			if alreadyVCount > 0 {
-				fmt.Printf("   ℹ️  [%d] %d baris sudah terisi 'v' (Hadir) → SKIP\n", idx+1, alreadyVCount)
+				AddLog("info", "NIM %s: [%d] %d sesi sudah terisi 'v' (Hadir). SKIP.", p.NIM, idx+1, alreadyVCount)
 			}
 
 			if len(buttonsToClick) == 0 {
-				fmt.Printf("   ✅ [%d] Tidak ada tombol presensi baru yang perlu diklik.\n", idx+1)
+				AddLog("info", "NIM %s: [%d] Tidak ada tombol presensi yang aktif untuk matkul ini.", p.NIM, idx+1)
 				return
 			}
 
-			fmt.Printf("   🔥 [%d] Ditemukan %d tombol presensi AKTIF!\n", idx+1, len(buttonsToClick))
+			AddLog("warning", "NIM %s: [%d] Ditemukan %d tombol presensi AKTIF!", p.NIM, idx+1, len(buttonsToClick))
 
 			clickCount := 0
 			var successMsg []string
 
 			for _, btn := range buttonsToClick {
-				fmt.Printf("   ⚡ [%d] Mengirim request presensi untuk baris %s...\n", idx+1, btn["rIdx"])
+				AddLog("info", "NIM %s: [%d] Memproses klik presensi baris %s...", p.NIM, idx+1, btn["rIdx"])
 
-				aResp, aErr := makeRequest(client, btn["link"], cookieHeader)
+				aResp, aErr := makeRequest(client, btn["link"], cookieHeader, userAgent)
 				if aErr != nil {
-					fmt.Printf("   ❌ [%d] Error saat klik presensi.\n", idx+1)
+					AddLog("error", "NIM %s: [%d] Gagal klik link presensi: %v", p.NIM, idx+1, aErr)
 					continue
 				}
 				if aResp.StatusCode == 301 || aResp.StatusCode == 302 {
-					fmt.Printf("   ⚠️ [%d] Session expired saat klik.\n", idx+1)
+					AddLog("warning", "NIM %s: [%d] Sesi terputus saat klik.", p.NIM, idx+1)
 					aResp.Body.Close()
 					return
 				}
 				aResp.Body.Close()
 
-				fmt.Printf("   ✅ [%d] Sukses memproses presensi baris %s!\n", idx+1, btn["rIdx"])
+				AddLog("success", "NIM %s: [%d] Berhasil presensi baris %s!", p.NIM, idx+1, btn["rIdx"])
 				clickCount++
 
 				waktuInfo := ""
@@ -446,52 +580,439 @@ func runBot() {
 
 	wg.Wait()
 
-	fmt.Println("\n==================================================")
-	fmt.Printf("🎉 Selesai! Berhasil melakukan %d presensi otomatis.\n", totalSuccess)
-	fmt.Println("==================================================")
+	p.LastRunTime = time.Now()
+	if totalSuccess > 0 {
+		p.LastRunStatus = "success"
+		p.LastRunMsg = fmt.Sprintf("Sukses klik %d tombol: %s", totalSuccess, strings.Join(matkulBerhasil, ", "))
+		AddLog("success", "NIM %s: Selesai! Berhasil memproses %d presensi otomatis.", p.NIM, totalSuccess)
 
-	if totalSuccess > 0 && len(matkulBerhasil) > 0 {
-		pesan := fmt.Sprintf("Presensi\n%s\n", strings.Join(matkulBerhasil, "\n"))
-		sendWhatsApp(pesan)
+		pesan := fmt.Sprintf("Presensi Otomatis UMM - NIM %s (%s)\n\n%s", p.NIM, p.Name, strings.Join(matkulBerhasil, "\n"))
+		sendWhatsApp(pesan, waToken, waGroup)
+	} else {
+		p.LastRunStatus = "no_link"
+		p.LastRunMsg = "Jadwal terbuka tapi tidak ada tombol presensi baru"
+		AddLog("info", "NIM %s: Tidak ada presensi baru yang diklik.", p.NIM)
 	}
 }
 
-func main() {
-	// Jalankan bot pertama kali dan kemudian secara berkala
+// Background scheduler
+func runBotForAllActive() {
+	studentProfilesMutex.RLock()
+	var activeProfiles []Profile
+	for _, p := range studentProfiles {
+		if p.IsActive {
+			activeProfiles = append(activeProfiles, p)
+		}
+	}
+	studentProfilesMutex.RUnlock()
+
+	if len(activeProfiles) == 0 {
+		AddLog("info", "Tidak ada akun aktif dalam scheduler.")
+		return
+	}
+
+	// Run sequentially to prevent rate limits
+	for i := range activeProfiles {
+		p := &activeProfiles[i]
+		runBotForProfile(p)
+
+		// Update state in db
+		studentProfilesMutex.Lock()
+		for j, dbP := range studentProfiles {
+			if dbP.NIM == p.NIM {
+				studentProfiles[j] = *p
+				break
+			}
+		}
+		studentProfilesMutex.Unlock()
+		saveStudentProfiles()
+
+		if i < len(activeProfiles)-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+
+func startScheduler() {
 	go func() {
+		// Small delay on start
+		time.Sleep(5 * time.Second)
 		for {
-			// Menggunakan timezone WIB (Asia/Jakarta = UTC+7)
+			configMutex.RLock()
+			interval := globalConfig.CheckInterval
+			startHour := globalConfig.StartHour
+			endHour := globalConfig.EndHour
+			configMutex.RUnlock()
+
+			if interval <= 0 {
+				interval = 5
+			}
+
 			loc := time.FixedZone("WIB", 7*60*60)
 			now := time.Now().In(loc)
 			hour := now.Hour()
 
-			// Hanya berjalan dari jam 07:00 sampai 20:59 WIB (di bawah jam 21:00)
-			if hour >= 7 && hour < 21 {
-				runBot()
-				fmt.Println("\n⏳ Menunggu 1 detik sebelum pengecekan berikutnya...")
-				time.Sleep(1 * time.Second)
+			if hour >= startHour && hour < endHour {
+				AddLog("system", "Memulai siklus pemeriksaan presensi terjadwal...")
+				runBotForAllActive()
+				AddLog("system", "Siklus selesai. Menunggu %d detik...", interval)
+				time.Sleep(time.Duration(interval) * time.Second)
 			} else {
-				fmt.Printf("\n😴 [%s WIB] Di luar jam aktif (07:00 - 21:00 WIB). Bot tidur, cek kembali dalam 10 menit...\n", now.Format("15:04:05"))
-				// Saat tidur, cukup cek setiap 10 menit agar hemat resource
+				AddLog("system", "Pukul %s WIB: Di luar jam operasional (%02d:00 - %02d:00). Scheduler tidur 10 menit...",
+					now.Format("15:04:05"), startHour, endHour)
 				time.Sleep(10 * time.Minute)
 			}
 		}
 	}()
+}
 
-	// Setup dummy HTTP server untuk Hugging Face
-	nethttp.HandleFunc("/", func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		w.WriteHeader(nethttp.StatusOK)
-		w.Write([]byte("🤖 Bot Presensi UMM is running smoothly!"))
+func basicAuthMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		expectedPassword := os.Getenv("WEB_PASSWORD")
+		if expectedPassword == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "admin" || password != expectedPassword {
+			w.Header().Set("WWW-Authenticate", `Basic realm="UMM Bot Presensi"`)
+			w.WriteHeader(nethttp.StatusUnauthorized)
+			w.Write([]byte("Unauthorized. Please enter username 'admin' and your custom WEB_PASSWORD.\n"))
+			return
+		}
+
+		next.ServeHTTP(w, r)
 	})
+}
+
+// REST HTTP Server
+func main() {
+	// Load Env if any (from root or local folder)
+	godotenv.Load("../.env")
+	godotenv.Load(".env")
+
+	AddLog("system", "Inisialisasi sistem basis data bot...")
+	loadData()
+
+	AddLog("system", "Memulai scheduler pengecekan latar belakang...")
+	startScheduler()
+
+	// API: Get/Post/Delete Profiles
+	nethttp.Handle("/api/profiles", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+
+		if r.Method == nethttp.MethodGet {
+			studentProfilesMutex.RLock()
+			defer studentProfilesMutex.RUnlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(studentProfiles)
+			return
+		}
+
+		if r.Method == nethttp.MethodPost {
+			var newP Profile
+			if err := json.NewDecoder(r.Body).Decode(&newP); err != nil {
+				nethttp.Error(w, err.Error(), nethttp.StatusBadRequest)
+				return
+			}
+
+			newP.NIM = strings.TrimSpace(newP.NIM)
+			newP.Name = strings.TrimSpace(newP.Name)
+			if newP.NIM == "" || newP.Name == "" || newP.CookiesJSON == "" {
+				nethttp.Error(w, "NIM, Nama, dan Cookies wajib diisi!", nethttp.StatusBadRequest)
+				return
+			}
+
+			studentProfilesMutex.Lock()
+			defer studentProfilesMutex.Unlock()
+
+			found := false
+			for i, p := range studentProfiles {
+				if p.NIM == newP.NIM {
+					// Update profile, keep previous logs intact
+					newP.LastRunStatus = p.LastRunStatus
+					newP.LastRunTime = p.LastRunTime
+					newP.LastRunMsg = p.LastRunMsg
+					studentProfiles[i] = newP
+					found = true
+					break
+				}
+			}
+			if !found {
+				studentProfiles = append(studentProfiles, newP)
+			}
+			saveStudentProfiles()
+
+			AddLog("system", "Profil NIM %s (%s) disimpan/diupdate.", newP.NIM, newP.Name)
+			w.WriteHeader(nethttp.StatusOK)
+			w.Write([]byte("success"))
+			return
+		}
+
+		if r.Method == nethttp.MethodDelete {
+			nim := r.URL.Query().Get("nim")
+			if nim == "" {
+				nethttp.Error(w, "NIM parameter is required", nethttp.StatusBadRequest)
+				return
+			}
+
+			studentProfilesMutex.Lock()
+			defer studentProfilesMutex.Unlock()
+
+			for i, p := range studentProfiles {
+				if p.NIM == nim {
+					studentProfiles = append(studentProfiles[:i], studentProfiles[i+1:]...)
+					saveStudentProfiles()
+					AddLog("system", "Profil NIM %s dihapus.", nim)
+					w.WriteHeader(nethttp.StatusOK)
+					w.Write([]byte("success"))
+					return
+				}
+			}
+
+			nethttp.Error(w, "Profil tidak ditemukan", nethttp.StatusNotFound)
+			return
+		}
+
+		nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+	})))
+
+	// API: Global Config
+	nethttp.Handle("/api/config", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+
+		if r.Method == nethttp.MethodGet {
+			configMutex.RLock()
+			defer configMutex.RUnlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(globalConfig)
+			return
+		}
+
+		if r.Method == nethttp.MethodPost {
+			var newCfg GlobalConfig
+			if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+				nethttp.Error(w, err.Error(), nethttp.StatusBadRequest)
+				return
+			}
+
+			configMutex.Lock()
+			globalConfig = newCfg
+			saveConfig()
+			configMutex.Unlock()
+
+			AddLog("system", "Konfigurasi global diperbarui.")
+			w.WriteHeader(nethttp.StatusOK)
+			w.Write([]byte("success"))
+			return
+		}
+
+		nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+	})))
+
+	// API: Run Bot Immediately
+	nethttp.Handle("/api/run-now", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+
+		if r.Method != nethttp.MethodPost {
+			nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			NIM string `json:"nim"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		go func() {
+			if payload.NIM == "" {
+				AddLog("system", "Menjalankan paksa bot presensi untuk semua akun aktif...")
+				runBotForAllActive()
+			} else {
+				studentProfilesMutex.Lock()
+				var targetIdx = -1
+				for i, p := range studentProfiles {
+					if p.NIM == payload.NIM {
+						targetIdx = i
+						break
+					}
+				}
+				studentProfilesMutex.Unlock()
+
+				if targetIdx != -1 {
+					studentProfilesMutex.Lock()
+					pCopy := studentProfiles[targetIdx]
+					studentProfilesMutex.Unlock()
+
+					AddLog("system", "Menjalankan paksa bot presensi NIM %s...", pCopy.NIM)
+					runBotForProfile(&pCopy)
+
+					studentProfilesMutex.Lock()
+					studentProfiles[targetIdx] = pCopy
+					studentProfilesMutex.Unlock()
+					saveStudentProfiles()
+				} else {
+					AddLog("error", "Pemicu manual gagal: NIM %s tidak ditemukan.", payload.NIM)
+				}
+			}
+		}()
+
+		w.WriteHeader(nethttp.StatusOK)
+		w.Write([]byte("triggered"))
+	})))
+
+	// API: Export backup
+	nethttp.Handle("/api/export", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		type BackupData struct {
+			Profiles []Profile    `json:"profiles"`
+			Config   GlobalConfig `json:"config"`
+		}
+
+		studentProfilesMutex.RLock()
+		configMutex.RLock()
+		backup := BackupData{
+			Profiles: studentProfiles,
+			Config:   globalConfig,
+		}
+		configMutex.RUnlock()
+		studentProfilesMutex.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", "attachment; filename=umm_bot_backup.json")
+		json.NewEncoder(w).Encode(backup)
+	})))
+
+	// API: Import backup
+	nethttp.Handle("/api/import", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.Method != nethttp.MethodPost {
+			nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+			return
+		}
+
+		type BackupData struct {
+			Profiles []Profile    `json:"profiles"`
+			Config   GlobalConfig `json:"config"`
+		}
+
+		var backup BackupData
+		if err := json.NewDecoder(r.Body).Decode(&backup); err != nil {
+			nethttp.Error(w, err.Error(), nethttp.StatusBadRequest)
+			return
+		}
+
+		studentProfilesMutex.Lock()
+		configMutex.Lock()
+		studentProfiles = backup.Profiles
+		globalConfig = backup.Config
+		saveStudentProfiles()
+		saveConfig()
+		configMutex.Unlock()
+		studentProfilesMutex.Unlock()
+
+		AddLog("system", "Backup konfigurasi berhasil diimpor! Total profil: %d", len(backup.Profiles))
+		w.WriteHeader(nethttp.StatusOK)
+		w.Write([]byte("success"))
+	})))
+
+	// API: Event Source (SSE) Log Stream
+	nethttp.Handle("/api/logs/stream", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, ok := w.(nethttp.Flusher)
+		if !ok {
+			nethttp.Error(w, "SSE Streaming tidak didukung!", nethttp.StatusInternalServerError)
+			return
+		}
+
+		// Stream past history logs instantly
+		logMutex.Lock()
+		for _, msg := range logCache {
+			data, _ := json.Marshal(msg)
+			fmt.Fprintf(w, "data: %s\n\n", string(data))
+		}
+		logMutex.Unlock()
+		flusher.Flush()
+
+		// Register new active SSE listener
+		ch := make(chan LogMessage, 50)
+		listenerMu.Lock()
+		listeners[ch] = true
+		listenerMu.Unlock()
+
+		defer func() {
+			listenerMu.Lock()
+			delete(listeners, ch)
+			listenerMu.Unlock()
+			close(ch)
+		}()
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case msg := <-ch:
+				data, _ := json.Marshal(msg)
+				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				flusher.Flush()
+			case <-ticker.C:
+				// Keep connection alive
+				fmt.Fprintf(w, ": keepalive\n\n")
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})))
+
+	// Serve Frontend Static files via embed
+	nethttp.Handle("/static/", basicAuthMiddleware(nethttp.FileServer(nethttp.FS(staticFS))))
+
+	// Serve Frontend Root
+	nethttp.Handle("/", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.URL.Path != "/" {
+			nethttp.NotFound(w, r)
+			return
+		}
+		indexHTML, err := staticFS.ReadFile("static/index.html")
+		if err != nil {
+			nethttp.Error(w, "Static asset not found", nethttp.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexHTML)
+	})))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "7860" // Default port untuk Hugging Face Spaces
+		port = "7860" // default port
 	}
 
-	fmt.Printf("🌍 Memulai server web di port %s untuk Hugging Face...\n", port)
+	AddLog("system", "Memulai web dashboard di http://localhost:%s...", port)
 	err := nethttp.ListenAndServe(":"+port, nil)
 	if err != nil {
-		log.Fatalf("❌ Server gagal dijalankan: %v", err)
+		log.Fatalf("❌ Web Server gagal dijalankan: %v", err)
 	}
 }

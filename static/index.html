@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UMM Presence Bot Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-area">
+                <span class="logo-icon"></span>
+                <div class="logo-text">
+                    <h1>UMM Bot Presensi</h1>
+                    <p>Automated Attendance System</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="bot-status-badge idles" id="bot-status">
+                    <span class="indicator"></span>
+                    <span class="status-text">Checking scheduler...</span>
+                </div>
+                <button class="btn btn-primary" onclick="triggerRunAll()">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    Run All Now
+                </button>
+                <div class="backup-actions">
+                    <button class="btn btn-secondary" onclick="exportConfig()" title="Backup Config as JSON">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        Export
+                    </button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('importFile').click()"
+                        title="Restore Config from JSON">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Import
+                    </button>
+                    <input type="file" id="importFile" accept=".json" style="display:none"
+                        onchange="importConfig(event)">
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <section class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon purple">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                </div>
+                <div class="stat-info">
+                    <h3>Total Akun</h3>
+                    <p id="stat-total-profiles">0</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon green">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                    </svg>
+                </div>
+                <div class="stat-info">
+                    <h3>Akun Aktif</h3>
+                    <p id="stat-active-profiles">0</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon blue">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                </div>
+                <div class="stat-info">
+                    <h3>Interval Cek</h3>
+                    <p id="stat-check-interval">5 Menit</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon amber">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                        <line x1="16" y1="2" x2="16" y2="6"></line>
+                        <line x1="8" y1="2" x2="8" y2="6"></line>
+                        <line x1="3" y1="10" x2="21" y2="10"></line>
+                    </svg>
+                </div>
+                <div class="stat-info">
+                    <h3>Jam Aktif (WIB)</h3>
+                    <p id="stat-active-hours">07:00 - 21:00</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Dashboard Layout -->
+        <main class="dashboard-layout">
+
+            <!-- Left Side: Profile Management -->
+            <section class="panel profiles-panel">
+                <div class="panel-header">
+                    <h2>Daftar Akun / NIM</h2>
+                    <button class="btn btn-sm btn-primary" onclick="openAddProfileModal()">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        Tambah Akun
+                    </button>
+                </div>
+                <div class="panel-content">
+                    <div class="table-responsive">
+                        <table class="data-table" id="profiles-table">
+                            <thead>
+                                <tr>
+                                    <th>NIM</th>
+                                    <th>Nama / Label</th>
+                                    <th>WhatsApp Target</th>
+                                    <th>Status Terakhir</th>
+                                    <th>Status Cek</th>
+                                    <th style="text-align: right;">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="profiles-list">
+                                <!-- Dynamic profile rows will go here -->
+                                <tr>
+                                    <td colspan="6" class="table-empty">Memuat data akun...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Side: Config and Logs -->
+            <div class="right-column">
+                <!-- Global Config Panel -->
+                <section class="panel config-panel">
+                    <div class="panel-header">
+                        <h2>Pengaturan Global</h2>
+                        <button class="btn btn-sm btn-secondary" onclick="saveGlobalConfig()">Simpan</button>
+                    </div>
+                    <div class="panel-content">
+                        <form id="global-config-form" class="form-grid">
+                            <div class="form-group">
+                                <label for="cfg-wa-token">WhatsApp Token (Fonnte)</label>
+                                <input type="password" id="cfg-wa-token" placeholder="Global Fonnte API Token">
+                            </div>
+                            <div class="form-group">
+                                <label for="cfg-wa-group">WhatsApp Target (Group ID/No Hp)</label>
+                                <input type="text" id="cfg-wa-group" placeholder="Global WA Group / Target No.">
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="cfg-interval">Interval Cek (Detik)</label>
+                                    <input type="number" id="cfg-interval" min="1" max="600" value="5">
+                                </div>
+                                <div class="form-group">
+                                    <label for="cfg-start-hour">Jam Mulai (WIB)</label>
+                                    <input type="number" id="cfg-start-hour" min="0" max="23" value="7">
+                                </div>
+                                <div class="form-group">
+                                    <label for="cfg-end-hour">Jam Selesai (WIB)</label>
+                                    <input type="number" id="cfg-end-hour" min="0" max="23" value="21">
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </section>
+
+                <!-- Live Log Terminal -->
+                <section class="panel logs-panel">
+                    <div class="panel-header">
+                        <h2>Log Aktivitas Bot</h2>
+                        <div class="log-actions">
+                            <span class="stream-badge active" id="stream-status">Live</span>
+                            <button class="btn btn-icon-sm" onclick="clearLogs()" title="Bersihkan Log">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                    stroke-linejoin="round" class="icon">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path
+                                        d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                    </path>
+                                    <line x1="10" y1="11" x2="10" y2="17"></line>
+                                    <line x1="14" y1="11" x2="14" y2="17"></line>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="panel-content log-container" id="log-terminal">
+                        <!-- Stream logs dynamically -->
+                        <div class="log-line system">=== Sistem Log Siap Streaming ===</div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal Form (Add/Edit Profile) -->
+    <div class="modal-overlay" id="profile-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Tambah Akun Baru</h3>
+                <button class="btn-close" onclick="closeProfileModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="profile-form" onsubmit="handleProfileSubmit(event)">
+                    <input type="hidden" id="prof-action" value="add">
+                    <div class="form-group">
+                        <label for="prof-nim">NIM (Nomor Induk Mahasiswa) *</label>
+                        <input type="text" id="prof-nim" required placeholder="Contoh: 202110370311234">
+                    </div>
+                    <div class="form-group">
+                        <label for="prof-name">Nama / Label Akun *</label>
+                        <input type="text" id="prof-name" required placeholder="Contoh: John Doe / Akun Utama">
+                    </div>
+                    <div class="form-group">
+                        <label for="prof-cookies">Cookies UMM (JSON Array / Text String) *</label>
+                        <textarea id="prof-cookies" required rows="6"
+                            placeholder="Paste data cookie dari ekstensi browser (misal cookie_umm.json atau format text cookie biasa)"></textarea>
+                        <span class="help-text">Mendukung format JSON JSON array `[{"name": "...", "value": "..."}]`
+                            atau string cookie HTTP `name=value; name2=value2`</span>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="prof-wa-token">WA Token Khusus (Opsional)</label>
+                            <input type="password" id="prof-wa-token" placeholder="Fonnte Token khusus akun ini">
+                        </div>
+                        <div class="form-group">
+                            <label for="prof-wa-group">WA Target Khusus (Opsional)</label>
+                            <input type="text" id="prof-wa-group" placeholder="Target No/Group khusus akun ini">
+                        </div>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="prof-active" checked>
+                        <label for="prof-active">Aktifkan Bot untuk Akun ini</label>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" onclick="closeProfileModal()">Batal</button>
+                        <button type="submit" class="btn btn-primary">Simpan Akun</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
