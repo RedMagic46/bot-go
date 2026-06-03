@@ -42,6 +42,7 @@ type Profile struct {
 	LastRunStatus string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", or ""
 	LastRunTime   time.Time `json:"last_run_time"`
 	LastRunMsg    string    `json:"last_run_msg"`
+	FailedCount   int       `json:"failed_count"`
 }
 
 type GlobalConfig struct {
@@ -318,10 +319,15 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 func runBotForProfile(p *Profile) []CourseSuccess {
 	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
 	if cookieHeader == "" {
-		p.LastRunStatus = "expired"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = "Cookie tidak valid / kosong"
-		AddLog("error", "NIM %s: Cookie kosong atau salah format.", p.NIM)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "expired"
+			p.LastRunMsg = "Cookie tidak valid / kosong (Gagal 3 kali)"
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Cookie tidak valid / kosong (Percobaan %d/3)", p.FailedCount)
+		}
+		AddLog("error", "NIM %s: Cookie kosong atau salah format (Percobaan %d/3).", p.NIM, p.FailedCount)
 		return nil
 	}
 
@@ -333,48 +339,76 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 
 	client, err := tls_client.NewHttpClient(tls_client.NewLogger(), options...)
 	if err != nil {
-		p.LastRunStatus = "failed"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = fmt.Sprintf("Gagal init TLS Client: %v", err)
-		AddLog("error", "NIM %s: Gagal inisialisasi client: %v", p.NIM, err)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "failed"
+			p.LastRunMsg = fmt.Sprintf("Gagal init TLS Client (Gagal 3 kali): %v", err)
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Gagal init TLS Client (Percobaan %d/3): %v", p.FailedCount, err)
+		}
+		AddLog("error", "NIM %s: Gagal inisialisasi client (Percobaan %d/3): %v", p.NIM, p.FailedCount, err)
 		return nil
 	}
 
 	AddLog("info", "🚀 NIM %s (%s): Memeriksa jadwal kuliah...", p.NIM, p.Name)
 	resp, err := makeRequest(client, URL_JADWAL, cookieHeader, userAgent)
 	if err != nil {
-		p.LastRunStatus = "failed"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = fmt.Sprintf("Gagal request jadwal: %v", err)
-		AddLog("error", "NIM %s: Gagal memuat jadwal: %v", p.NIM, err)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "failed"
+			p.LastRunMsg = fmt.Sprintf("Gagal request jadwal (Gagal 3 kali): %v", err)
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Gagal request jadwal (Percobaan %d/3): %v", p.FailedCount, err)
+		}
+		AddLog("error", "NIM %s: Gagal memuat jadwal (Percobaan %d/3): %v", p.NIM, p.FailedCount, err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 403 {
-		p.LastRunStatus = "expired"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = "Cloudflare memblokir request (HTTP 403)"
-		AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403). Ganti Cookies Anda.", p.NIM)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "expired"
+			p.LastRunMsg = "Cloudflare memblokir request (HTTP 403) (Gagal 3 kali)"
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Cloudflare memblokir request (HTTP 403) (Percobaan %d/3)", p.FailedCount)
+		}
+		AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403) (Percobaan %d/3). Ganti Cookies Anda.", p.NIM, p.FailedCount)
 		return nil
 	}
 
 	if resp.StatusCode == 301 || resp.StatusCode == 302 {
-		p.LastRunStatus = "expired"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = "Sesi kedaluwarsa (Redirect ke Login)"
-		AddLog("warning", "NIM %s: Sesi kedaluwarsa, silakan update Cookies.", p.NIM)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "expired"
+			p.LastRunMsg = "Sesi kedaluwarsa (Redirect ke Login) (Gagal 3 kali)"
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Sesi kedaluwarsa (Redirect ke Login) (Percobaan %d/3)", p.FailedCount)
+		}
+		AddLog("warning", "NIM %s: Sesi kedaluwarsa (Percobaan %d/3), silakan update Cookies.", p.NIM, p.FailedCount)
 		return nil
 	}
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		p.LastRunStatus = "failed"
+		p.FailedCount++
 		p.LastRunTime = time.Now()
-		p.LastRunMsg = fmt.Sprintf("Gagal parse HTML: %v", err)
-		AddLog("error", "NIM %s: Gagal parsing HTML jadwal: %v", p.NIM, err)
+		if p.FailedCount >= 3 {
+			p.LastRunStatus = "failed"
+			p.LastRunMsg = fmt.Sprintf("Gagal parse HTML (Gagal 3 kali): %v", err)
+		} else {
+			p.LastRunMsg = fmt.Sprintf("Gagal parse HTML (Percobaan %d/3): %v", p.FailedCount, err)
+		}
+		AddLog("error", "NIM %s: Gagal parsing HTML jadwal (Percobaan %d/3): %v", p.NIM, p.FailedCount, err)
 		return nil
 	}
+
+	// Reset hitungan gagal karena sesi cookie valid dan pengambilan data jadwal sukses
+	p.FailedCount = 0
 
 	var presenceLinks []string
 	doc.Find("a.btn-success, a.btn-xs").Each(func(i int, s *goquery.Selection) {
