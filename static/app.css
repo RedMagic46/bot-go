@@ -233,6 +233,7 @@ body {
     justify-content: center;
     width: 32px;
     height: 32px;
+    padding: 0;
     border-radius: var(--radius-sm);
     background: hsla(220, 20%, 20%, 0.4);
     border: 1px solid var(--border-glass);
