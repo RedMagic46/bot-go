@@ -22,6 +22,7 @@ import (
 )
 
 // Embed frontend static files
+//
 //go:embed static/*
 var staticFS embed.FS
 
@@ -59,6 +60,20 @@ type CookieItem struct {
 type CookieJSON struct {
 	UserAgent string       `json:"user_agent"`
 	Cookies   []CookieItem `json:"cookies"`
+}
+
+type CourseSuccess struct {
+	CourseName string
+	TimeInfo   string
+}
+
+type SuccessRecord struct {
+	NIM        string
+	Name       string
+	CourseName string
+	TimeInfo   string
+	WAToken    string
+	WAGroup    string
 }
 
 // In-Memory Database & Mutexes
@@ -162,10 +177,10 @@ func loadData() {
 			}
 			if legacyCookies != "" {
 				studentProfiles = append(studentProfiles, Profile{
-					NIM:      legacyNIM,
-					Name:     "Default Profile (Migrated)",
+					NIM:         legacyNIM,
+					Name:        "Default Profile (Migrated)",
 					CookiesJSON: legacyCookies,
-					IsActive: true,
+					IsActive:    true,
 				})
 				saveStudentProfiles()
 				AddLog("system", "Berhasil migrasi profil bawaan Env dari NIM %s.", legacyNIM)
@@ -300,32 +315,14 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 }
 
 // Core Bot Executor
-func runBotForProfile(p *Profile) {
-	AddLog("info", "============================================================")
-	AddLog("info", "🚀 MEMULAI PRESENSI: NIM %s (%s)", p.NIM, p.Name)
-	AddLog("info", "============================================================")
-
+func runBotForProfile(p *Profile) []CourseSuccess {
 	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
 	if cookieHeader == "" {
 		p.LastRunStatus = "expired"
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = "Cookie tidak valid / kosong"
 		AddLog("error", "NIM %s: Cookie kosong atau salah format.", p.NIM)
-		return
-	}
-
-	// Resolve WA configurations
-	waToken := p.WAToken
-	if waToken == "" {
-		configMutex.RLock()
-		waToken = globalConfig.WAToken
-		configMutex.RUnlock()
-	}
-	waGroup := p.WAGroup
-	if waGroup == "" {
-		configMutex.RLock()
-		waGroup = globalConfig.WAGroup
-		configMutex.RUnlock()
+		return nil
 	}
 
 	options := []tls_client.HttpClientOption{
@@ -340,7 +337,7 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = fmt.Sprintf("Gagal init TLS Client: %v", err)
 		AddLog("error", "NIM %s: Gagal inisialisasi client: %v", p.NIM, err)
-		return
+		return nil
 	}
 
 	AddLog("info", "🚀 NIM %s (%s): Memeriksa jadwal kuliah...", p.NIM, p.Name)
@@ -350,7 +347,7 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = fmt.Sprintf("Gagal request jadwal: %v", err)
 		AddLog("error", "NIM %s: Gagal memuat jadwal: %v", p.NIM, err)
-		return
+		return nil
 	}
 	defer resp.Body.Close()
 
@@ -359,7 +356,7 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = "Cloudflare memblokir request (HTTP 403)"
 		AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403). Ganti Cookies Anda.", p.NIM)
-		return
+		return nil
 	}
 
 	if resp.StatusCode == 301 || resp.StatusCode == 302 {
@@ -367,7 +364,7 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = "Sesi kedaluwarsa (Redirect ke Login)"
 		AddLog("warning", "NIM %s: Sesi kedaluwarsa, silakan update Cookies.", p.NIM)
-		return
+		return nil
 	}
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
@@ -376,7 +373,7 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = fmt.Sprintf("Gagal parse HTML: %v", err)
 		AddLog("error", "NIM %s: Gagal parsing HTML jadwal: %v", p.NIM, err)
-		return
+		return nil
 	}
 
 	var presenceLinks []string
@@ -408,11 +405,11 @@ func runBotForProfile(p *Profile) {
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = "Tidak ada tautan presensi matkul aktif."
 		AddLog("info", "ℹ️ NIM %s: Selesai memeriksa. Tidak ada jadwal mata kuliah aktif yang butuh presensi.", p.NIM)
-		return
+		return nil
 	}
 
 	totalSuccess := 0
-	var matkulBerhasil []string
+	var matkulBerhasil []CourseSuccess
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -462,16 +459,32 @@ func runBotForProfile(p *Profile) {
 			pDoc.Find("table thead th").Each(func(hIdx int, s *goquery.Selection) {
 				hText := strings.ToLower(strings.TrimSpace(s.Text()))
 				headers = append(headers, hText)
-				if strings.Contains(hText, "hadir") { hadirIdx = hIdx }
-				if strings.Contains(hText, "aksi") { aksiIdx = hIdx }
-				if strings.Contains(hText, "mulai") { mulaiIdx = hIdx }
-				if strings.Contains(hText, "selesai") { selesaiIdx = hIdx }
+				if strings.Contains(hText, "hadir") {
+					hadirIdx = hIdx
+				}
+				if strings.Contains(hText, "aksi") {
+					aksiIdx = hIdx
+				}
+				if strings.Contains(hText, "mulai") {
+					mulaiIdx = hIdx
+				}
+				if strings.Contains(hText, "selesai") {
+					selesaiIdx = hIdx
+				}
 			})
 
-			if hadirIdx == -1 { hadirIdx = 5 }
-			if aksiIdx == -1 { aksiIdx = 6 }
-			if mulaiIdx == -1 { mulaiIdx = 3 }
-			if selesaiIdx == -1 { selesaiIdx = 4 }
+			if hadirIdx == -1 {
+				hadirIdx = 5
+			}
+			if aksiIdx == -1 {
+				aksiIdx = 6
+			}
+			if mulaiIdx == -1 {
+				mulaiIdx = 3
+			}
+			if selesaiIdx == -1 {
+				selesaiIdx = 4
+			}
 
 			alreadyVCount := 0
 			var buttonsToClick []map[string]string
@@ -529,7 +542,7 @@ func runBotForProfile(p *Profile) {
 			}
 
 			clickCount := 0
-			var successMsg []string
+			var successes []CourseSuccess
 
 			for _, btn := range buttonsToClick {
 				aResp, aErr := makeRequest(client, btn["link"], cookieHeader, userAgent)
@@ -546,17 +559,17 @@ func runBotForProfile(p *Profile) {
 
 				clickCount++
 
-				waktuInfo := ""
+				timeInfo := "Tidak diketahui"
 				if btn["mulai"] != "" && btn["selesai"] != "" {
-					waktuInfo = fmt.Sprintf(" (%s - %s)", btn["mulai"], btn["selesai"])
+					timeInfo = fmt.Sprintf("%s - %s", btn["mulai"], btn["selesai"])
 				}
-				successMsg = append(successMsg, fmt.Sprintf("• %s%s", courseName, waktuInfo))
+				successes = append(successes, CourseSuccess{CourseName: courseName, TimeInfo: timeInfo})
 			}
 
 			if clickCount > 0 {
 				mu.Lock()
 				totalSuccess += clickCount
-				matkulBerhasil = append(matkulBerhasil, successMsg...)
+				matkulBerhasil = append(matkulBerhasil, successes...)
 				mu.Unlock()
 			}
 		}(i, link)
@@ -567,16 +580,19 @@ func runBotForProfile(p *Profile) {
 	p.LastRunTime = time.Now()
 	if totalSuccess > 0 {
 		p.LastRunStatus = "success"
-		p.LastRunMsg = fmt.Sprintf("Sukses klik %d tombol: %s", totalSuccess, strings.Join(matkulBerhasil, ", "))
-		AddLog("success", "✅ NIM %s: Berhasil melakukan %d presensi otomatis pada:\n%s", p.NIM, totalSuccess, strings.Join(matkulBerhasil, "\n"))
-
-		pesan := fmt.Sprintf("Presensi Otomatis UMM - NIM %s (%s)\n\n%s", p.NIM, p.Name, strings.Join(matkulBerhasil, "\n"))
-		sendWhatsApp(pesan, waToken, waGroup)
+		var lines []string
+		for _, cs := range matkulBerhasil {
+			lines = append(lines, fmt.Sprintf("• %s (%s)", cs.CourseName, cs.TimeInfo))
+		}
+		p.LastRunMsg = fmt.Sprintf("Sukses klik %d tombol: %s", totalSuccess, strings.Join(lines, ", "))
+		AddLog("success", "✅ NIM %s: Berhasil melakukan %d presensi otomatis pada:\n%s", p.NIM, totalSuccess, strings.Join(lines, "\n"))
 	} else {
 		p.LastRunStatus = "no_link"
 		p.LastRunMsg = "Jadwal terbuka tapi tidak ada tombol presensi baru"
 		AddLog("info", "ℹ️ NIM %s: Selesai memeriksa %d mata kuliah. Tidak ada presensi baru yang aktif.", p.NIM, len(presenceLinks))
 	}
+
+	return matkulBerhasil
 }
 
 // Background scheduler
@@ -595,10 +611,37 @@ func runBotForAllActive() {
 		return
 	}
 
+	var allSuccesses []SuccessRecord
+
 	// Run sequentially to prevent rate limits
 	for i := range activeProfiles {
 		p := &activeProfiles[i]
-		runBotForProfile(p)
+		successes := runBotForProfile(p)
+
+		// Resolve WA configurations
+		waToken := p.WAToken
+		if waToken == "" {
+			configMutex.RLock()
+			waToken = globalConfig.WAToken
+			configMutex.RUnlock()
+		}
+		waGroup := p.WAGroup
+		if waGroup == "" {
+			configMutex.RLock()
+			waGroup = globalConfig.WAGroup
+			configMutex.RUnlock()
+		}
+
+		for _, cs := range successes {
+			allSuccesses = append(allSuccesses, SuccessRecord{
+				NIM:        p.NIM,
+				Name:       p.Name,
+				CourseName: cs.CourseName,
+				TimeInfo:   cs.TimeInfo,
+				WAToken:    waToken,
+				WAGroup:    waGroup,
+			})
+		}
 
 		// Update state in db
 		studentProfilesMutex.Lock()
@@ -613,6 +656,57 @@ func runBotForAllActive() {
 
 		if i < len(activeProfiles)-1 {
 			time.Sleep(5 * time.Second)
+		}
+	}
+
+	// Aggregate and send WhatsApp notifications
+	if len(allSuccesses) > 0 {
+		// Group by target (WAToken + "::" + WAGroup)
+		targetGroups := make(map[string][]SuccessRecord)
+		for _, rec := range allSuccesses {
+			key := rec.WAToken + "::" + rec.WAGroup
+			targetGroups[key] = append(targetGroups[key], rec)
+		}
+
+		for key, records := range targetGroups {
+			parts := strings.SplitN(key, "::", 2)
+			token := parts[0]
+			group := parts[1]
+
+			if token == "" || group == "" {
+				continue
+			}
+
+			// Group by class session (CourseName + "::" + TimeInfo)
+			classGroups := make(map[string][]SuccessRecord)
+			for _, rec := range records {
+				classKey := rec.CourseName + "::" + rec.TimeInfo
+				classGroups[classKey] = append(classGroups[classKey], rec)
+			}
+
+			// Construct and send message for each class session
+			for classKey, classRecs := range classGroups {
+				classParts := strings.SplitN(classKey, "::", 2)
+				courseName := classParts[0]
+				timeInfo := classParts[1]
+
+				if len(classRecs) > 1 {
+					// Multiple students in the same class session -> Combined message!
+					var studentList []string
+					for _, r := range classRecs {
+						studentList = append(studentList, fmt.Sprintf("• %s (%s)", r.Name, r.NIM))
+					}
+					pesan := fmt.Sprintf("🔔 PRESENSI OTOMATIS - KELAS BERSAMA\n\n📚 Matkul: %s\n🕒 Waktu: %s\n\nDaftar Mahasiswa Berhasil:\n%s",
+						courseName, timeInfo, strings.Join(studentList, "\n"))
+					sendWhatsApp(pesan, token, group)
+				} else {
+					// Only 1 student in this class session -> Single-student message!
+					r := classRecs[0]
+					pesan := fmt.Sprintf("Presensi Otomatis - NIM %s (%s)\n\n• %s (%s)",
+						r.NIM, r.Name, courseName, timeInfo)
+					sendWhatsApp(pesan, token, group)
+				}
+			}
 		}
 	}
 }
@@ -848,7 +942,32 @@ func main() {
 					studentProfilesMutex.Unlock()
 
 					AddLog("system", "Menjalankan paksa bot presensi NIM %s...", pCopy.NIM)
-					runBotForProfile(&pCopy)
+					successes := runBotForProfile(&pCopy)
+
+					// Send WA immediately for manual runs
+					if len(successes) > 0 {
+						waToken := pCopy.WAToken
+						if waToken == "" {
+							configMutex.RLock()
+							waToken = globalConfig.WAToken
+							configMutex.RUnlock()
+						}
+						waGroup := pCopy.WAGroup
+						if waGroup == "" {
+							configMutex.RLock()
+							waGroup = globalConfig.WAGroup
+							configMutex.RUnlock()
+						}
+
+						if waToken != "" && waGroup != "" {
+							var lines []string
+							for _, cs := range successes {
+								lines = append(lines, fmt.Sprintf("• %s (%s)", cs.CourseName, cs.TimeInfo))
+							}
+							pesan := fmt.Sprintf("Presensi Otomatis - NIM %s (%s)\n\n%s", pCopy.NIM, pCopy.Name, strings.Join(lines, "\n"))
+							sendWhatsApp(pesan, waToken, waGroup)
+						}
+					}
 
 					studentProfilesMutex.Lock()
 					studentProfiles[targetIdx] = pCopy
