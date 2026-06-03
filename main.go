@@ -343,7 +343,7 @@ func runBotForProfile(p *Profile) {
 		return
 	}
 
-	AddLog("info", "NIM %s: Mengakses halaman jadwal kuliah...", p.NIM)
+	AddLog("info", "🚀 NIM %s (%s): Memeriksa jadwal kuliah...", p.NIM, p.Name)
 	resp, err := makeRequest(client, URL_JADWAL, cookieHeader, userAgent)
 	if err != nil {
 		p.LastRunStatus = "failed"
@@ -403,13 +403,11 @@ func runBotForProfile(p *Profile) {
 		}
 	})
 
-	AddLog("info", "NIM %s: Ditemukan %d tautan presensi mata kuliah.", p.NIM, len(presenceLinks))
-
 	if len(presenceLinks) == 0 {
 		p.LastRunStatus = "no_link"
 		p.LastRunTime = time.Now()
 		p.LastRunMsg = "Tidak ada tautan presensi matkul aktif."
-		AddLog("info", "NIM %s: Tidak ada jadwal mata kuliah aktif yang butuh presensi.", p.NIM)
+		AddLog("info", "ℹ️ NIM %s: Selesai memeriksa. Tidak ada jadwal mata kuliah aktif yang butuh presensi.", p.NIM)
 		return
 	}
 
@@ -422,8 +420,6 @@ func runBotForProfile(p *Profile) {
 		wg.Add(1)
 		go func(idx int, targetLink string) {
 			defer wg.Done()
-
-			AddLog("info", "NIM %s: [%d/%d] Membuka panel presensi...", p.NIM, idx+1, len(presenceLinks))
 
 			pResp, pErr := makeRequest(client, targetLink, cookieHeader, userAgent)
 			if pErr != nil || pResp.StatusCode != 200 {
@@ -458,8 +454,6 @@ func runBotForProfile(p *Profile) {
 					}
 				}
 			})
-
-			AddLog("info", "NIM %s: [%d] Matkul: %s", p.NIM, idx+1, courseName)
 
 			// Parse Table Headers
 			var headers []string
@@ -530,23 +524,14 @@ func runBotForProfile(p *Profile) {
 				}
 			})
 
-			if alreadyVCount > 0 {
-				AddLog("info", "NIM %s: [%d] %d sesi sudah terisi 'v' (Hadir). SKIP.", p.NIM, idx+1, alreadyVCount)
-			}
-
 			if len(buttonsToClick) == 0 {
-				AddLog("info", "NIM %s: [%d] Tidak ada tombol presensi yang aktif untuk matkul ini.", p.NIM, idx+1)
 				return
 			}
-
-			AddLog("warning", "NIM %s: [%d] Ditemukan %d tombol presensi AKTIF!", p.NIM, idx+1, len(buttonsToClick))
 
 			clickCount := 0
 			var successMsg []string
 
 			for _, btn := range buttonsToClick {
-				AddLog("info", "NIM %s: [%d] Memproses klik presensi baris %s...", p.NIM, idx+1, btn["rIdx"])
-
 				aResp, aErr := makeRequest(client, btn["link"], cookieHeader, userAgent)
 				if aErr != nil {
 					AddLog("error", "NIM %s: [%d] Gagal klik link presensi: %v", p.NIM, idx+1, aErr)
@@ -559,7 +544,6 @@ func runBotForProfile(p *Profile) {
 				}
 				aResp.Body.Close()
 
-				AddLog("success", "NIM %s: [%d] Berhasil presensi baris %s!", p.NIM, idx+1, btn["rIdx"])
 				clickCount++
 
 				waktuInfo := ""
@@ -584,14 +568,14 @@ func runBotForProfile(p *Profile) {
 	if totalSuccess > 0 {
 		p.LastRunStatus = "success"
 		p.LastRunMsg = fmt.Sprintf("Sukses klik %d tombol: %s", totalSuccess, strings.Join(matkulBerhasil, ", "))
-		AddLog("success", "NIM %s: Selesai! Berhasil memproses %d presensi otomatis.", p.NIM, totalSuccess)
+		AddLog("success", "✅ NIM %s: Berhasil melakukan %d presensi otomatis pada:\n%s", p.NIM, totalSuccess, strings.Join(matkulBerhasil, "\n"))
 
 		pesan := fmt.Sprintf("Presensi Otomatis UMM - NIM %s (%s)\n\n%s", p.NIM, p.Name, strings.Join(matkulBerhasil, "\n"))
 		sendWhatsApp(pesan, waToken, waGroup)
 	} else {
 		p.LastRunStatus = "no_link"
 		p.LastRunMsg = "Jadwal terbuka tapi tidak ada tombol presensi baru"
-		AddLog("info", "NIM %s: Tidak ada presensi baru yang diklik.", p.NIM)
+		AddLog("info", "ℹ️ NIM %s: Selesai memeriksa %d mata kuliah. Tidak ada presensi baru yang aktif.", p.NIM, len(presenceLinks))
 	}
 }
 
