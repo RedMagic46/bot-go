@@ -612,52 +612,60 @@ func runBotForAllActive() {
 	}
 
 	var allSuccesses []SuccessRecord
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
-	// Run sequentially to prevent rate limits
+	// Run concurrently using Goroutines
 	for i := range activeProfiles {
-		p := &activeProfiles[i]
-		successes := runBotForProfile(p)
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
 
-		// Resolve WA configurations
-		waToken := p.WAToken
-		if waToken == "" {
-			configMutex.RLock()
-			waToken = globalConfig.WAToken
-			configMutex.RUnlock()
-		}
-		waGroup := p.WAGroup
-		if waGroup == "" {
-			configMutex.RLock()
-			waGroup = globalConfig.WAGroup
-			configMutex.RUnlock()
-		}
+			p := &activeProfiles[idx]
+			successes := runBotForProfile(p)
 
-		for _, cs := range successes {
-			allSuccesses = append(allSuccesses, SuccessRecord{
-				NIM:        p.NIM,
-				Name:       p.Name,
-				CourseName: cs.CourseName,
-				TimeInfo:   cs.TimeInfo,
-				WAToken:    waToken,
-				WAGroup:    waGroup,
-			})
-		}
-
-		// Update state in db
-		studentProfilesMutex.Lock()
-		for j, dbP := range studentProfiles {
-			if dbP.NIM == p.NIM {
-				studentProfiles[j] = *p
-				break
+			// Resolve WA configurations
+			waToken := p.WAToken
+			if waToken == "" {
+				configMutex.RLock()
+				waToken = globalConfig.WAToken
+				configMutex.RUnlock()
 			}
-		}
-		studentProfilesMutex.Unlock()
-		saveStudentProfiles()
+			waGroup := p.WAGroup
+			if waGroup == "" {
+				configMutex.RLock()
+				waGroup = globalConfig.WAGroup
+				configMutex.RUnlock()
+			}
 
-		if i < len(activeProfiles)-1 {
-			time.Sleep(5 * time.Second)
-		}
+			// Safe append to successes slice
+			mu.Lock()
+			for _, cs := range successes {
+				allSuccesses = append(allSuccesses, SuccessRecord{
+					NIM:        p.NIM,
+					Name:       p.Name,
+					CourseName: cs.CourseName,
+					TimeInfo:   cs.TimeInfo,
+					WAToken:    waToken,
+					WAGroup:    waGroup,
+				})
+			}
+			mu.Unlock()
+
+			// Update state in db
+			studentProfilesMutex.Lock()
+			for j, dbP := range studentProfiles {
+				if dbP.NIM == p.NIM {
+					studentProfiles[j] = *p
+					break
+				}
+			}
+			studentProfilesMutex.Unlock()
+		}(i)
 	}
+
+	wg.Wait()
+	saveStudentProfiles()
 
 	// Aggregate and send WhatsApp notifications
 	if len(allSuccesses) > 0 {
