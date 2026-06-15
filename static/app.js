@@ -21,6 +21,13 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConfig();
     fetchProfiles();
     initLogStream();
+
+    // Scroll to bottom immediately if user unchecks Freeze Scroll
+    document.getElementById('freeze-scroll').addEventListener('change', (e) => {
+        if (!e.target.checked) {
+            logTerminal.scrollTop = logTerminal.scrollHeight;
+        }
+    });
 });
 
 // Toast Notifications
@@ -412,8 +419,11 @@ function appendLog(logMsg) {
     logLine.innerHTML = `<span class="timestamp">[${timeStr}]</span>${escapeHTML(logMsg.message)}`;
     logTerminal.appendChild(logLine);
     
-    // Auto Scroll to Bottom
-    logTerminal.scrollTop = logTerminal.scrollHeight;
+    // Auto Scroll to Bottom (if not frozen)
+    const isFrozen = document.getElementById('freeze-scroll')?.checked;
+    if (!isFrozen) {
+        logTerminal.scrollTop = logTerminal.scrollHeight;
+    }
     
     // Limit logs inside DOM
     while (logTerminal.childElementCount > 300) {
