@@ -90,6 +90,16 @@ var (
 	}
 )
 
+type CachedClient struct {
+	Client    tls_client.HttpClient
+	UserAgent string
+}
+
+var (
+	clientCache   = make(map[string]CachedClient)
+	clientCacheMu sync.Mutex
+)
+
 // Log System
 type LogMessage struct {
 	Timestamp time.Time `json:"timestamp"`
@@ -348,13 +358,31 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 		clientProfile = profiles.Chrome_120
 	}
 
-	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(30),
-		tls_client.WithClientProfile(clientProfile),
-		tls_client.WithNotFollowRedirects(),
+	clientCacheMu.Lock()
+	cached, exists := clientCache[p.NIM]
+	var client tls_client.HttpClient
+	var err error
+	if exists && cached.UserAgent == userAgent {
+		client = cached.Client
+		clientCacheMu.Unlock()
+	} else {
+		clientCacheMu.Unlock()
+		options := []tls_client.HttpClientOption{
+			tls_client.WithTimeoutSeconds(30),
+			tls_client.WithClientProfile(clientProfile),
+			tls_client.WithNotFollowRedirects(),
+		}
+		client, err = tls_client.NewHttpClient(tls_client.NewLogger(), options...)
+		if err == nil {
+			clientCacheMu.Lock()
+			clientCache[p.NIM] = CachedClient{
+				Client:    client,
+				UserAgent: userAgent,
+			}
+			clientCacheMu.Unlock()
+		}
 	}
 
-	client, err := tls_client.NewHttpClient(tls_client.NewLogger(), options...)
 	if err != nil {
 		p.FailedCount++
 		p.LastRunTime = time.Now()
