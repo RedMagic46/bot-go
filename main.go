@@ -298,8 +298,18 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Cookie", cookieHeader)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	
+	if strings.Contains(strings.ToLower(userAgent), "firefox") {
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	} else {
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("sec-ch-ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+		req.Header.Set("sec-ch-ua-mobile", "?0")
+		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	}
+
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Sec-Fetch-Dest", "document")
@@ -331,9 +341,16 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 		return nil
 	}
 
+	var clientProfile profiles.ClientProfile
+	if strings.Contains(strings.ToLower(userAgent), "firefox") {
+		clientProfile = profiles.Firefox_132
+	} else {
+		clientProfile = profiles.Chrome_120
+	}
+
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(30),
-		tls_client.WithClientProfile(profiles.Firefox_132),
+		tls_client.WithClientProfile(clientProfile),
 		tls_client.WithNotFollowRedirects(),
 	}
 
