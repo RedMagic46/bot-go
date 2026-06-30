@@ -106,13 +106,15 @@ async def run(nim, password):
     except ImportError:
         log("Camoufox tidak tersedia, menggunakan Playwright standar...")
 
+    pw = None
+
     if use_camoufox:
         try:
             browser = await AsyncCamoufox(
                 headless=True, humanize=True
             ).__aenter__()
-            page = await browser.new_page()
-            context = page.context
+            context = await browser.new_context(viewport=None)
+            page = await context.new_page()
         except Exception as e:
             log(f"Camoufox gagal: {e}. Fallback ke Playwright...")
             use_camoufox = False
@@ -125,7 +127,7 @@ async def run(nim, password):
             browser = await pw.firefox.launch(headless=True)
         except Exception:
             browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context()
+        context = await browser.new_context(viewport=None)
         page = await context.new_page()
 
     try:
@@ -200,6 +202,8 @@ async def run(nim, password):
     finally:
         if browser:
             await browser.close()
+        if pw:
+            await pw.__aexit__(None, None, None)
 
 
 def main():

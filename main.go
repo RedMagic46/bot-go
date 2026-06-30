@@ -407,7 +407,19 @@ func refreshCookies(p *Profile) error {
 			}
 		}
 
+		// Parse JSON result from stdout if available, even on error
+		var result RefreshResult
+		hasResult := false
+		if stdout.Len() > 0 {
+			if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr == nil && result.Status != "" {
+				hasResult = true
+			}
+		}
+
 		if err != nil {
+			if hasResult && result.Error != "" {
+				return fmt.Errorf("cookie_refresher.py gagal: %s", result.Error)
+			}
 			return fmt.Errorf("cookie_refresher.py gagal: %v", err)
 		}
 
