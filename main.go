@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	nethttp "net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,10 +39,11 @@ type Profile struct {
 	NIM           string    `json:"nim"`
 	Name          string    `json:"name"`
 	CookiesJSON   string    `json:"cookies_json"`
+	Password      string    `json:"password"`       // base64 encoded
 	WAToken       string    `json:"wa_token"`
 	WAGroup       string    `json:"wa_group"`
 	IsActive      bool      `json:"is_active"`
-	LastRunStatus string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", or ""
+	LastRunStatus string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", "refreshing", or ""
 	LastRunTime   time.Time `json:"last_run_time"`
 	LastRunMsg    string    `json:"last_run_msg"`
 	FailedCount   int       `json:"failed_count"`
@@ -335,6 +339,114 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 	return resp, nil
 }
 
+// Cookie Refresh via Python headless browser
+type RefreshResult struct {
+	Status     string `json:"status"`
+	NIM        string `json:"nim"`
+	Name       string `json:"name"`
+	CookiesJSON string `json:"cookies_json"`
+	UserAgent  string `json:"user_agent"`
+	Error      string `json:"error"`
+}
+
+func encodePassword(plain string) string {
+	return base64.StdEncoding.EncodeToString([]byte(plain))
+}
+
+func decodePassword(encoded string) string {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return encoded // fallback: treat as plain text
+	}
+	return string(data)
+}
+
+func refreshCookies(p *Profile) error {
+	password := decodePassword(p.Password)
+	if p.NIM == "" || password == "" {
+		return fmt.Errorf("NIM atau Password kosong, tidak bisa auto-refresh cookie")
+	}
+
+	AddLog("system", "🔄 NIM %s: Memulai auto-refresh cookie via headless browser...", p.NIM)
+	p.LastRunStatus = "refreshing"
+	p.LastRunMsg = "Sedang refresh cookie via headless browser..."
+
+	// Find python script path
+	scriptPath := "cookie_refresher.py"
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		scriptPath = filepath.Join("..", "cookie_refresher.py")
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			return fmt.Errorf("cookie_refresher.py tidak ditemukan")
+		}
+	}
+
+	// Find python binary
+	pythonCmd := "python3"
+	if _, err := exec.LookPath("python3"); err != nil {
+		pythonCmd = "python"
+	}
+
+	cmd := exec.Command(pythonCmd, scriptPath, "--nim", p.NIM, "--password", password)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Timeout: 3 minutes max
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		// Log stderr (Python logs go here)
+		if stderrStr := strings.TrimSpace(stderr.String()); stderrStr != "" {
+			for _, line := range strings.Split(stderrStr, "\n") {
+				AddLog("info", "🐍 %s", line)
+			}
+		}
+
+		if err != nil {
+			return fmt.Errorf("cookie_refresher.py gagal: %v", err)
+		}
+
+	case <-time.After(3 * time.Minute):
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		return fmt.Errorf("cookie refresh timeout (3 menit)")
+	}
+
+	// Parse JSON result from stdout
+	var result RefreshResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return fmt.Errorf("gagal parse output refresher: %v (raw: %s)", err, stdout.String())
+	}
+
+	if result.Status != "success" {
+		return fmt.Errorf("refresh gagal: %s", result.Error)
+	}
+
+	// Update profile with new cookies
+	p.CookiesJSON = result.CookiesJSON
+	if result.Name != "" && result.Name != "Unknown" {
+		p.Name = result.Name
+	}
+	p.FailedCount = 0
+	p.LastRunStatus = ""
+	p.LastRunMsg = "Cookie berhasil di-refresh otomatis!"
+
+	AddLog("success", "🎉 NIM %s: Cookie berhasil di-refresh! Sesi baru aktif.", p.NIM)
+
+	// Invalidate cached TLS client so it picks up new user-agent
+	clientCacheMu.Lock()
+	delete(clientCache, p.NIM)
+	clientCacheMu.Unlock()
+
+	return nil
+}
+
 // Core Bot Executor
 func runBotForProfile(p *Profile) []CourseSuccess {
 	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
@@ -418,10 +530,27 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 		if p.FailedCount >= 3 {
 			p.LastRunStatus = "expired"
 			p.LastRunMsg = "Cloudflare memblokir request (HTTP 403) (Gagal 3 kali)"
+			AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403) (Gagal 3 kali).", p.NIM)
+
+			// Auto-refresh cookies if password is available
+			if p.Password != "" {
+				AddLog("system", "NIM %s: Mencoba auto-refresh cookie...", p.NIM)
+				if err := refreshCookies(p); err != nil {
+					AddLog("error", "NIM %s: Auto-refresh gagal: %v", p.NIM, err)
+					p.LastRunStatus = "expired"
+					p.LastRunMsg = fmt.Sprintf("Cookie expired & auto-refresh gagal: %v", err)
+				} else {
+					// Retry once with new cookies
+					AddLog("info", "NIM %s: Mencoba ulang presensi dengan cookie baru...", p.NIM)
+					return runBotForProfile(p)
+				}
+			} else {
+				AddLog("warning", "NIM %s: Password tidak tersedia, tidak bisa auto-refresh. Silakan update cookie manual.", p.NIM)
+			}
 		} else {
 			p.LastRunMsg = fmt.Sprintf("Cloudflare memblokir request (HTTP 403) (Percobaan %d/3)", p.FailedCount)
+			AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403) (Percobaan %d/3).", p.NIM, p.FailedCount)
 		}
-		AddLog("error", "NIM %s: Cloudflare memblokir akses (HTTP 403) (Percobaan %d/3). Ganti Cookies Anda.", p.NIM, p.FailedCount)
 		return nil
 	}
 
@@ -431,10 +560,27 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 		if p.FailedCount >= 3 {
 			p.LastRunStatus = "expired"
 			p.LastRunMsg = "Sesi kedaluwarsa (Redirect ke Login) (Gagal 3 kali)"
+			AddLog("warning", "NIM %s: Sesi kedaluwarsa (Gagal 3 kali).", p.NIM)
+
+			// Auto-refresh cookies if password is available
+			if p.Password != "" {
+				AddLog("system", "NIM %s: Mencoba auto-refresh cookie...", p.NIM)
+				if err := refreshCookies(p); err != nil {
+					AddLog("error", "NIM %s: Auto-refresh gagal: %v", p.NIM, err)
+					p.LastRunStatus = "expired"
+					p.LastRunMsg = fmt.Sprintf("Sesi expired & auto-refresh gagal: %v", err)
+				} else {
+					// Retry once with new cookies
+					AddLog("info", "NIM %s: Mencoba ulang presensi dengan cookie baru...", p.NIM)
+					return runBotForProfile(p)
+				}
+			} else {
+				AddLog("warning", "NIM %s: Password tidak tersedia, tidak bisa auto-refresh. Silakan update cookie manual.", p.NIM)
+			}
 		} else {
 			p.LastRunMsg = fmt.Sprintf("Sesi kedaluwarsa (Redirect ke Login) (Percobaan %d/3)", p.FailedCount)
+			AddLog("warning", "NIM %s: Sesi kedaluwarsa (Percobaan %d/3).", p.NIM, p.FailedCount)
 		}
-		AddLog("warning", "NIM %s: Sesi kedaluwarsa (Percobaan %d/3), silakan update Cookies.", p.NIM, p.FailedCount)
 		return nil
 	}
 
@@ -890,9 +1036,17 @@ func main() {
 
 			newP.NIM = strings.TrimSpace(newP.NIM)
 			newP.Name = strings.TrimSpace(newP.Name)
-			if newP.NIM == "" || newP.Name == "" || newP.CookiesJSON == "" {
-				nethttp.Error(w, "NIM, Nama, dan Cookies wajib diisi!", nethttp.StatusBadRequest)
+			if newP.NIM == "" || newP.Name == "" {
+				nethttp.Error(w, "NIM dan Nama wajib diisi!", nethttp.StatusBadRequest)
 				return
+			}
+
+			// Encode password with base64 if provided as plain text
+			if newP.Password != "" {
+				// Check if it's already base64
+				if _, err := base64.StdEncoding.DecodeString(newP.Password); err != nil {
+					newP.Password = encodePassword(newP.Password)
+				}
 			}
 
 			studentProfilesMutex.Lock()
@@ -905,6 +1059,14 @@ func main() {
 					newP.LastRunStatus = p.LastRunStatus
 					newP.LastRunTime = p.LastRunTime
 					newP.LastRunMsg = p.LastRunMsg
+					// Keep existing password if not provided
+					if newP.Password == "" {
+						newP.Password = p.Password
+					}
+					// Keep existing cookies if not provided
+					if newP.CookiesJSON == "" {
+						newP.CookiesJSON = p.CookiesJSON
+					}
 					studentProfiles[i] = newP
 					found = true
 					break
@@ -1068,6 +1230,75 @@ func main() {
 
 		w.WriteHeader(nethttp.StatusOK)
 		w.Write([]byte("triggered"))
+	})))
+
+	// API: Refresh Cookies via headless browser
+	nethttp.Handle("/api/refresh-cookies", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+
+		if r.Method != nethttp.MethodPost {
+			nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			NIM string `json:"nim"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		if payload.NIM == "" {
+			nethttp.Error(w, "NIM wajib diisi", nethttp.StatusBadRequest)
+			return
+		}
+
+		go func() {
+			studentProfilesMutex.Lock()
+			var targetIdx = -1
+			for i, p := range studentProfiles {
+				if p.NIM == payload.NIM {
+					targetIdx = i
+					break
+				}
+			}
+			if targetIdx == -1 {
+				studentProfilesMutex.Unlock()
+				AddLog("error", "Refresh cookie gagal: NIM %s tidak ditemukan.", payload.NIM)
+				return
+			}
+
+			pCopy := studentProfiles[targetIdx]
+			studentProfilesMutex.Unlock()
+
+			if pCopy.Password == "" {
+				AddLog("error", "NIM %s: Password tidak tersedia. Silakan tambahkan password di pengaturan profil untuk menggunakan fitur auto-refresh.", pCopy.NIM)
+				return
+			}
+
+			if err := refreshCookies(&pCopy); err != nil {
+				AddLog("error", "NIM %s: Refresh cookie gagal: %v", pCopy.NIM, err)
+				pCopy.LastRunStatus = "failed"
+				pCopy.LastRunMsg = fmt.Sprintf("Refresh cookie manual gagal: %v", err)
+			}
+
+			studentProfilesMutex.Lock()
+			for i, p := range studentProfiles {
+				if p.NIM == pCopy.NIM {
+					studentProfiles[i] = pCopy
+					break
+				}
+			}
+			studentProfilesMutex.Unlock()
+			saveStudentProfiles()
+		}()
+
+		w.WriteHeader(nethttp.StatusOK)
+		w.Write([]byte("refresh_triggered"))
 	})))
 
 	// API: Export backup

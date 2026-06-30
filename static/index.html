@@ -250,11 +250,16 @@
                         <input type="text" id="prof-name" required placeholder="Contoh: John Doe / Akun Utama">
                     </div>
                     <div class="form-group">
-                        <label for="prof-cookies">Cookies UMM (JSON Array / Text String) *</label>
-                        <textarea id="prof-cookies" required rows="6"
-                            placeholder="Paste data cookie dari ekstensi browser (misal cookie_umm.json atau format text cookie biasa)"></textarea>
-                        <span class="help-text">Mendukung format JSON JSON array `[{"name": "...", "value": "..."}]`
+                        <label for="prof-cookies">Cookies UMM (JSON / Text) — Opsional jika Password diisi</label>
+                        <textarea id="prof-cookies" rows="6"
+                            placeholder="Paste data cookie dari ekstensi browser. Jika Password diisi, cookie akan otomatis di-refresh saat expired."></textarea>
+                        <span class="help-text">Mendukung format JSON array `[{"name": "...", "value": "..."}]`
                             atau string cookie HTTP `name=value; name2=value2`</span>
+                    </div>
+                    <div class="form-group">
+                        <label for="prof-password">Password Login UMM (Opsional — untuk Auto-Refresh Cookie)</label>
+                        <input type="password" id="prof-password" placeholder="Password login infokhs.umm.ac.id">
+                        <span class="help-text">Jika diisi, bot akan otomatis me-refresh cookie saat expired via headless browser di server.</span>
                     </div>
                     <div class="form-row">
                         <div class="form-group">

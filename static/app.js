@@ -101,6 +101,8 @@ function renderProfiles() {
             statusBadge = `<span class="badge badge-info">Tidak Ada Matkul Aktif</span>`;
         } else if (p.last_run_status === 'expired') {
             statusBadge = `<span class="badge badge-warning">Cookie Expired</span>`;
+        } else if (p.last_run_status === 'refreshing') {
+            statusBadge = `<span class="badge badge-info" style="animation: pulse 1.5s infinite;">Refreshing Cookie...</span>`;
         }
 
         const lastCheck = p.last_run_time && p.last_run_time !== '0001-01-01T00:00:00Z'
@@ -133,6 +135,9 @@ function renderProfiles() {
                         <button class="btn btn-icon-sm" onclick="triggerRunNow('${p.nim}')" title="Jalankan Presensi Sekarang">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                         </button>
+                        ${p.password ? `<button class="btn btn-icon-sm" onclick="refreshCookies('${p.nim}')" title="Refresh Cookie via Browser" style="color:var(--warning)">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                        </button>` : ''}
                         <button class="btn btn-icon-sm" onclick="openEditProfileModal('${p.nim}')" title="Edit Akun">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
                         </button>
@@ -224,6 +229,7 @@ function openAddProfileModal() {
     document.getElementById('prof-nim').readOnly = false;
     document.getElementById('prof-name').value = '';
     document.getElementById('prof-cookies').value = '';
+    document.getElementById('prof-password').value = '';
     document.getElementById('prof-wa-token').value = '';
     document.getElementById('prof-wa-group').value = '';
     document.getElementById('prof-active').checked = true;
@@ -240,6 +246,7 @@ function openEditProfileModal(nim) {
     document.getElementById('prof-nim').readOnly = true;
     document.getElementById('prof-name').value = p.name;
     document.getElementById('prof-cookies').value = p.cookies_json || '';
+    document.getElementById('prof-password').value = ''; // Don't show existing password
     document.getElementById('prof-wa-token').value = p.wa_token || '';
     document.getElementById('prof-wa-group').value = p.wa_group || '';
     document.getElementById('prof-active').checked = p.is_active;
@@ -272,6 +279,7 @@ async function handleProfileSubmit(e) {
         nim: nim,
         name: document.getElementById('prof-name').value,
         cookies_json: validatedCookies,
+        password: document.getElementById('prof-password').value,
         wa_token: document.getElementById('prof-wa-token').value,
         wa_group: document.getElementById('prof-wa-group').value,
         is_active: document.getElementById('prof-active').checked
@@ -325,6 +333,28 @@ async function triggerRunNow(nim) {
         showToast(`Bot presensi NIM ${nim} selesai dijalankan. Silakan cek Log!`, 'success');
         // Refresh profiles to see updated status
         setTimeout(fetchProfiles, 1500);
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+// Refresh Cookies via headless browser
+async function refreshCookies(nim) {
+    if (!confirm(`Refresh cookie NIM ${nim} via headless browser? Proses ini membutuhkan waktu 1-3 menit.`)) return;
+    
+    showToast(`🔄 Memulai refresh cookie NIM ${nim}... Cek Log untuk progress.`, 'info');
+    try {
+        const res = await fetch('/api/refresh-cookies', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nim: nim })
+        });
+        if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(errText || 'Gagal memicu refresh cookie');
+        }
+        showToast(`Refresh cookie NIM ${nim} sedang berjalan. Pantau di Log!`, 'success');
+        setTimeout(fetchProfiles, 3000);
     } catch (err) {
         showToast(err.message, 'error');
     }

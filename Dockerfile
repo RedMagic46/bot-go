@@ -1,4 +1,4 @@
-# 1. Tahap Build (Kompilasi)
+# 1. Tahap Build (Kompilasi Go)
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
@@ -14,24 +14,51 @@ COPY . .
 # Build aplikasi Go menjadi single binary bernama 'bot-presensi'
 RUN CGO_ENABLED=0 GOOS=linux go build -o bot-presensi main.go
 
-# 2. Tahap Eksekusi (Image akhir yang ultra ringan)
-FROM alpine:latest
+# 2. Tahap Eksekusi (Runtime dengan Python + Browser untuk auto-refresh cookie)
+FROM python:3.10-slim
 
-# Bikin user dengan ID 1000 (standar wajib Hugging Face)
-RUN adduser -D -u 1000 user
+# Set HOME variable to a directory accessible by user 1000
+ENV HOME=/home/user
+RUN mkdir -p /home/user/.cache && chmod -R 777 /home/user
+
+# Instal dependensi sistem yang dibutuhkan oleh Playwright/Camoufox
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Salin hasil kompilasi (binary) dari tahap builder
+# Salin requirements dan instal Python library
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Instal browser Playwright (Firefox) beserta dependensi OS-nya
+RUN python -m playwright install firefox
+RUN python -m playwright install-deps firefox
+
+# Instal browser Camoufox
+RUN python -m camoufox fetch
+
+# Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .
 
-# Ubah kepemilikan file ke user 1000
-RUN chown -R user:user /app
+# Salin Python cookie refresher script
+COPY cookie_refresher.py .
+
+# Salin static files (sudah di-embed ke Go binary, tapi backup)
+COPY static/ ./static/
+
+# Berikan akses penuh untuk user non-root
+RUN chmod -R 777 /app /home/user
+
+# Bikin user dengan ID 1000 (standar wajib Hugging Face / Railway)
+RUN adduser --disabled-password --uid 1000 user || true
 
 # Gunakan user 1000 untuk menjalankan aplikasi
 USER user
 
-# Buka port 7860 untuk Hugging Face
+# Buka port 7860
 EXPOSE 7860
 
 CMD ["./bot-presensi"]
