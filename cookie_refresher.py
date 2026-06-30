@@ -3,13 +3,7 @@
 Cookie Refresher - Headless browser login untuk UMM Infokhs
 Dipanggil dari Go via subprocess.
 
-Usage:
-  python cookie_refresher.py --nim 202410370110027 --password SECRET
-
-Output: JSON ke stdout dengan format:
-  {"status": "success", "nim": "...", "name": "...", "cookies_json": "...", "user_agent": "..."}
-  atau
-  {"status": "error", "error": "..."}
+Menggunakan standard Playwright Chromium + Stealth untuk bypass Cloudflare.
 """
 
 import argparse
@@ -60,25 +54,10 @@ async def fill_credentials(page, nim, password):
             await page.fill('input[name="password"]', password)
             await asyncio.sleep(0.5)
 
-        # Click login button
-        login_btn = None
-        try:
-            login_btn = await page.wait_for_selector("button.submit", timeout=3000)
-        except Exception:
-            pass
-        if not login_btn:
-            try:
-                login_btn = await page.wait_for_selector(
-                    'button[type="submit"]', timeout=2000
-                )
-            except Exception:
-                pass
-
-        if login_btn:
-            await login_btn.click()
-        else:
-            await page.keyboard.press("Enter")
-
+        await close_modal(page)
+        
+        # Submit via Enter
+        await page.keyboard.press("Enter")
     except Exception as e:
         log(f"Form login tidak diisi otomatis: {e}")
 
@@ -92,47 +71,25 @@ async def run(nim, password):
     url_login = "https://infokhs.umm.ac.id/login"
     url_profil = "https://infokhs.umm.ac.id/profil"
 
+    from playwright.async_api import async_playwright
+    from playwright_stealth import Stealth
+
+    pw_context = async_playwright()
+    pw = await pw_context.__aenter__()
+
+    # Hook stealth at playwright level
+    stealth = Stealth()
+    stealth.hook_playwright_context(pw)
+
     browser = None
-    context = None
-    page = None
-    use_camoufox = False
-
-    # Try Camoufox first (better Cloudflare bypass)
     try:
-        from camoufox.async_api import AsyncCamoufox
-
-        use_camoufox = True
-        log("Menggunakan Camoufox (headless) untuk bypass Cloudflare...")
-    except ImportError:
-        log("Camoufox tidak tersedia, menggunakan Playwright standar...")
-
-    pw = None
-
-    if use_camoufox:
-        try:
-            browser = await AsyncCamoufox(
-                headless=True, humanize=True
-            ).__aenter__()
-            context = await browser.new_context(viewport=None)
-            page = await context.new_page()
-        except Exception as e:
-            log(f"Camoufox gagal: {e}. Fallback ke Playwright...")
-            use_camoufox = False
-
-    if not use_camoufox:
-        from playwright.async_api import async_playwright
-
-        pw = await async_playwright().__aenter__()
-        try:
-            browser = await pw.firefox.launch(headless=True)
-        except Exception:
-            browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(viewport=None)
+        log("Meluncurkan Chromium headless dengan Stealth...")
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context()
         page = await context.new_page()
 
-    try:
         log(f"Membuka halaman login: {url_login}")
-        await page.goto(url_login)
+        await page.goto(url_login, timeout=20000)
 
         await fill_credentials(page, nim, password)
 
@@ -202,8 +159,8 @@ async def run(nim, password):
     finally:
         if browser:
             await browser.close()
-        if pw:
-            await pw.__aexit__(None, None, None)
+        if pw_context:
+            await pw_context.__aexit__(None, None, None)
 
 
 def main():

@@ -14,14 +14,14 @@ COPY . .
 # Build aplikasi Go menjadi single binary bernama 'bot-presensi'
 RUN CGO_ENABLED=0 GOOS=linux go build -o bot-presensi main.go
 
-# 2. Tahap Eksekusi (Runtime dengan Python + Browser untuk auto-refresh cookie)
+# 2. Tahap Eksekusi (Runtime dengan Python + Playwright Chromium untuk auto-refresh cookie)
 FROM python:3.10-slim
 
 # Set HOME variable to a directory accessible by user 1000
 ENV HOME=/home/user
 RUN mkdir -p /home/user/.cache && chmod -R 777 /home/user
 
-# Instal dependensi sistem yang dibutuhkan oleh Playwright/Camoufox
+# Instal dependensi sistem yang dibutuhkan oleh Playwright Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -29,16 +29,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Salin requirements dan instal Python library
+# Salin requirements dan instal Python library (playwright, playwright-stealth)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instal browser Playwright (Firefox) beserta dependensi OS-nya
-RUN python -m playwright install firefox
-RUN python -m playwright install-deps firefox
-
-# Instal browser Camoufox
-RUN python -m camoufox fetch
+# Instal browser Playwright (Chromium) beserta dependensi OS-nya
+RUN python -m playwright install chromium
+RUN python -m playwright install-deps chromium
 
 # Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .
