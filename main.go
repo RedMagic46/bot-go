@@ -31,7 +31,7 @@ var staticFS embed.FS
 
 var (
 	URL_JADWAL = "https://infokhs.umm.ac.id/jadwal-kuliah"
-	USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 // Data Models
@@ -319,7 +319,7 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 	} else {
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		req.Header.Set("sec-ch-ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+		req.Header.Set("sec-ch-ua", `"Not_A Brand";v="24", "Chromium";v="131", "Google Chrome";v="131"`)
 		req.Header.Set("sec-ch-ua-mobile", "?0")
 		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
 	}
@@ -479,7 +479,7 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 	if strings.Contains(strings.ToLower(userAgent), "firefox") {
 		clientProfile = profiles.Firefox_132
 	} else {
-		clientProfile = profiles.Chrome_120
+		clientProfile = profiles.Chrome_131
 	}
 
 	clientCacheMu.Lock()

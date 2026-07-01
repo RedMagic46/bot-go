@@ -83,9 +83,11 @@ async def run(nim, password):
 
     browser = None
     try:
-        log("Meluncurkan Chromium headless dengan Stealth...")
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context()
+        log("Meluncurkan Firefox headless...")
+        browser = await pw.firefox.launch(headless=True)
+        # Gunakan User-Agent Firefox 132 agar sesuai dengan profile tls-client di Go (menghindari block Cloudflare 403)
+        firefox_132_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
+        context = await browser.new_context(user_agent=firefox_132_ua)
         page = await context.new_page()
 
         log(f"Membuka halaman login: {url_login}")
