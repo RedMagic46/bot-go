@@ -33,9 +33,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instal browser Playwright (Chromium) beserta dependensi OS-nya
-RUN python -m playwright install chromium
-RUN python -m playwright install-deps chromium
+# Instal browser Playwright (Firefox) beserta dependensi OS-nya
+RUN python -m playwright install firefox
+RUN python -m playwright install-deps firefox
 
 # Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .
