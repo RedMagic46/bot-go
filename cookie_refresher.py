@@ -122,7 +122,10 @@ async def run(nim, password):
         page = await context.new_page()
 
         log(f"Membuka halaman login: {url_login}")
-        await page.goto(url_login, timeout=25000)
+        try:
+            await page.goto(url_login, timeout=30000, wait_until="domcontentloaded")
+        except Exception as e:
+            log(f"Warning saat goto login (mencoba lanjut baca halaman): {e}")
 
         filled = await fill_credentials(page, nim, password)
 
