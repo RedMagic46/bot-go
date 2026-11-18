@@ -496,6 +496,11 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 			tls_client.WithClientProfile(clientProfile),
 			tls_client.WithNotFollowRedirects(),
 		}
+		// Route melalui WARP SOCKS5 proxy jika tersedia
+		proxyURL := os.Getenv("PROXY_URL")
+		if proxyURL != "" {
+			options = append(options, tls_client.WithProxyUrl(proxyURL))
+		}
 		client, err = tls_client.NewHttpClient(tls_client.NewLogger(), options...)
 		if err == nil {
 			clientCacheMu.Lock()

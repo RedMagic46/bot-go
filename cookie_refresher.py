@@ -7,6 +7,7 @@ Dipanggil dari Go via subprocess.
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 
@@ -110,7 +111,12 @@ async def run(nim, password):
     browser = None
     try:
         log("Meluncurkan Firefox headless...")
-        browser = await pw.firefox.launch(headless=True)
+        proxy_url = os.environ.get("PROXY_URL", "")
+        launch_opts = {"headless": True}
+        if proxy_url:
+            launch_opts["proxy"] = {"server": proxy_url}
+            log(f"Menggunakan proxy: {proxy_url}")
+        browser = await pw.firefox.launch(**launch_opts)
         firefox_132_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
         context = await browser.new_context(user_agent=firefox_132_ua)
         page = await context.new_page()
