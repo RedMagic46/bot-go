@@ -14,28 +14,14 @@ COPY . .
 # Build aplikasi Go menjadi single binary bernama 'bot-presensi'
 RUN CGO_ENABLED=0 GOOS=linux go build -o bot-presensi main.go
 
-# 2. Tahap Eksekusi (Runtime dengan Python + Playwright Chromium untuk auto-refresh cookie)
-FROM python:3.10-slim
-
-# Set HOME variable to a directory accessible by user 1000
-ENV HOME=/home/user
-RUN mkdir -p /home/user/.cache && chmod -R 777 /home/user
-
-# Instal dependensi sistem yang dibutuhkan oleh Playwright Chromium
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
+# 2. Tahap Eksekusi (Image resmi Playwright Microsoft - sudah include Python & browser Firefox lengkap)
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
 WORKDIR /app
 
-# Salin requirements dan instal Python library (playwright, playwright-stealth)
+# Salin requirements dan instal Python library (playwright-stealth)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Instal browser Playwright (Firefox) beserta dependensi OS-nya
-RUN python -m playwright install firefox
-RUN python -m playwright install-deps firefox
 
 # Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .
@@ -43,17 +29,11 @@ COPY --from=builder /app/bot-presensi .
 # Salin Python cookie refresher script
 COPY cookie_refresher.py .
 
-# Salin static files (sudah di-embed ke Go binary, tapi backup)
+# Salin static files
 COPY static/ ./static/
 
-# Berikan akses penuh untuk user non-root
-RUN chmod -R 777 /app /home/user
-
-# Bikin user dengan ID 1000 (standar wajib Hugging Face / Railway)
-RUN adduser --disabled-password --uid 1000 user || true
-
-# Gunakan user 1000 untuk menjalankan aplikasi
-USER user
+# Berikan hak akses
+RUN chmod -R 777 /app
 
 # Buka port 7860
 EXPOSE 7860
