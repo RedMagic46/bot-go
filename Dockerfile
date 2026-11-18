@@ -14,14 +14,17 @@ COPY . .
 # Build aplikasi Go menjadi single binary bernama 'bot-presensi'
 RUN CGO_ENABLED=0 GOOS=linux go build -o bot-presensi main.go
 
-# 2. Tahap Eksekusi (Image resmi Playwright Microsoft - sudah include Python & browser Firefox lengkap)
+# 2. Tahap Eksekusi (Image resmi Playwright Microsoft - sudah include Python & dependencies)
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
 WORKDIR /app
 
-# Salin requirements dan instal Python library (playwright-stealth)
+# Salin requirements dan instal Python library (pin version agar match dengan base image)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pastikan browser firefox versi 1.49.0 terpasang
+RUN python -m playwright install firefox
 
 # Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .
