@@ -961,6 +961,92 @@ func runBotForAllActive() {
 	}
 }
 
+// Ping Keep-Alive agar sesi PHP cookie tetap aktif dan tidak kedaluwarsa
+func pingKeepAliveForProfile(p *Profile) {
+	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
+	if cookieHeader == "" {
+		return
+	}
+
+	var clientProfile profiles.ClientProfile
+	if strings.Contains(strings.ToLower(userAgent), "firefox") {
+		clientProfile = profiles.Firefox_132
+	} else {
+		clientProfile = profiles.Chrome_131
+	}
+
+	clientCacheMu.Lock()
+	cached, exists := clientCache[p.NIM]
+	var client tls_client.HttpClient
+	var err error
+	if exists && cached.UserAgent == userAgent {
+		client = cached.Client
+		clientCacheMu.Unlock()
+	} else {
+		clientCacheMu.Unlock()
+		options := []tls_client.HttpClientOption{
+			tls_client.WithTimeoutSeconds(30),
+			tls_client.WithClientProfile(clientProfile),
+			tls_client.WithNotFollowRedirects(),
+		}
+		proxyURL := os.Getenv("PROXY_URL")
+		if proxyURL != "" {
+			options = append(options, tls_client.WithProxyUrl(proxyURL))
+		}
+		client, err = tls_client.NewHttpClient(tls_client.NewLogger(), options...)
+		if err == nil {
+			clientCacheMu.Lock()
+			clientCache[p.NIM] = CachedClient{
+				Client:    client,
+				UserAgent: userAgent,
+			}
+			clientCacheMu.Unlock()
+		}
+	}
+
+	if err != nil {
+		AddLog("warning", "⚠️ NIM %s: Gagal inisialisasi client untuk keep-alive: %v", p.NIM, err)
+		return
+	}
+
+	resp, err := makeRequest(client, URL_JADWAL, cookieHeader, userAgent)
+	if err != nil {
+		AddLog("warning", "⚠️ NIM %s: Ping keep-alive gagal request: %v", p.NIM, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		AddLog("info", "💓 NIM %s (%s): Ping keep-alive sesi berhasil (HTTP 200, sesi aktif diperpanjang).", p.NIM, p.Name)
+	} else if resp.StatusCode == 301 || resp.StatusCode == 302 {
+		AddLog("warning", "⚠️ NIM %s: Sesi kedaluwarsa saat keep-alive (HTTP %d, redirect ke login).", p.NIM, resp.StatusCode)
+	} else if resp.StatusCode == 403 {
+		AddLog("warning", "⚠️ NIM %s: Cloudflare 403 saat ping keep-alive.", p.NIM)
+	} else {
+		AddLog("info", "ℹ️ NIM %s: Ping keep-alive selesai dengan respon HTTP %d.", p.NIM, resp.StatusCode)
+	}
+}
+
+func pingKeepAliveForAllActive() {
+	studentProfilesMutex.RLock()
+	profilesCopy := make([]Profile, len(studentProfiles))
+	copy(profilesCopy, studentProfiles)
+	studentProfilesMutex.RUnlock()
+
+	var wg sync.WaitGroup
+	for i := range profilesCopy {
+		if !profilesCopy[i].IsActive {
+			continue
+		}
+		wg.Add(1)
+		go func(p Profile) {
+			defer wg.Done()
+			pingKeepAliveForProfile(&p)
+		}(profilesCopy[i])
+	}
+	wg.Wait()
+}
+
 func startScheduler() {
 	go func() {
 		// Small delay on start
@@ -986,9 +1072,11 @@ func startScheduler() {
 				AddLog("system", "Siklus selesai. Menunggu %d detik...", interval)
 				time.Sleep(time.Duration(interval) * time.Second)
 			} else {
-				AddLog("system", "Pukul %s WIB: Di luar jam operasional (%02d:00 - %02d:00). Scheduler tidur 10 menit...",
+				AddLog("system", "Pukul %s WIB: Di luar jam operasional (%02d:00 - %02d:00). Menjalankan ping keep-alive sesi...",
 					now.Format("15:04:05"), startHour, endHour)
-				time.Sleep(10 * time.Minute)
+				pingKeepAliveForAllActive()
+				AddLog("system", "Ping keep-alive selesai. Menunggu 15 menit untuk ping berikutnya...")
+				time.Sleep(15 * time.Minute)
 			}
 		}
 	}()
