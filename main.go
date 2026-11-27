@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	nethttp "net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,23 +38,28 @@ var (
 
 // Data Models
 type Profile struct {
-	NIM           string    `json:"nim"`
-	Name          string    `json:"name"`
-	CookiesJSON   string    `json:"cookies_json"`
-	Password      string    `json:"password"`       // base64 encoded
-	WAToken       string    `json:"wa_token"`
-	WAGroup       string    `json:"wa_group"`
-	IsActive      bool      `json:"is_active"`
-	LastRunStatus string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", "refreshing", or ""
-	LastRunTime   time.Time `json:"last_run_time"`
-	LastRunMsg    string    `json:"last_run_msg"`
-	FailedCount   int       `json:"failed_count"`
+	NIM              string    `json:"nim"`
+	Name             string    `json:"name"`
+	CookiesJSON      string    `json:"cookies_json"`
+	Password         string    `json:"password"` // base64 encoded
+	WAToken          string    `json:"wa_token"`
+	WAGroup          string    `json:"wa_group"`
+	IsActive         bool      `json:"is_active"`
+	LastRunStatus    string    `json:"last_run_status"` // "success", "failed", "no_link", "expired", "needs_cookie", "refreshing", "paused", or ""
+	LastRunTime      time.Time `json:"last_run_time"`
+	LastRunMsg       string    `json:"last_run_msg"`
+	FailedCount      int       `json:"failed_count"`
+	CookieUpdatedAt  time.Time `json:"cookie_updated_at"` // kapan cookie terakhir di-refresh/di-push
+	Paused           bool      `json:"paused"`            // dihentikan sementara sampai cookie baru diberikan
+	PauseReason      string    `json:"pause_reason"`
+	FailureAlertSent bool      `json:"failure_alert_sent"` // pengingat WA sudah dikirim untuk episode gagal ini
 }
 
 type GlobalConfig struct {
 	WAToken       string `json:"wa_token"`
 	WAGroup       string `json:"wa_group"`
-	CheckInterval int    `json:"check_interval"` // in minutes
+	WAAlertNumber string `json:"wa_alert_number"` // nomor WA admin untuk pengingat 10x gagal
+	CheckInterval int    `json:"check_interval"`  // in minutes
 	StartHour     int    `json:"start_hour"`
 	EndHour       int    `json:"end_hour"`
 }
@@ -158,10 +165,45 @@ func AddLog(level, format string, v ...interface{}) {
 	listenerMu.Unlock()
 }
 
+// Data directory helper
+//
+// Di Azure App Service (custom container) folder /app bersifat sementara.
+// Set env DATA_DIR=/home/data agar profiles.json & config.json tersimpan permanen.
+func dataPath(name string) string {
+	dir := strings.TrimSpace(os.Getenv("DATA_DIR"))
+	if dir == "" {
+		return name
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		AddLog("warning", "Gagal membuat DATA_DIR '%s': %v (memakai folder saat ini)", dir, err)
+		return name
+	}
+	return filepath.Join(dir, name)
+}
+
+// readDataFile membaca file dari DATA_DIR. Jika belum ada, coba migrasi
+// otomatis dari folder aplikasi (lokasi lama) supaya data tidak hilang.
+func readDataFile(name string) ([]byte, error) {
+	target := dataPath(name)
+	data, err := os.ReadFile(target)
+	if err == nil {
+		return data, nil
+	}
+	if target != name {
+		if legacy, legacyErr := os.ReadFile(name); legacyErr == nil {
+			if writeErr := os.WriteFile(target, legacy, 0o644); writeErr == nil {
+				AddLog("system", "Data '%s' dimigrasikan ke DATA_DIR.", name)
+			}
+			return legacy, nil
+		}
+	}
+	return nil, err
+}
+
 // Database Operations
 func loadData() {
 	// Try loading config
-	cfgData, err := os.ReadFile("config.json")
+	cfgData, err := readDataFile("config.json")
 	if err == nil {
 		json.Unmarshal(cfgData, &globalConfig)
 	} else {
@@ -172,7 +214,7 @@ func loadData() {
 	}
 
 	// Try loading profiles
-	profData, err := os.ReadFile("profiles.json")
+	profData, err := readDataFile("profiles.json")
 	if err == nil {
 		json.Unmarshal(profData, &studentProfiles)
 	} else {
@@ -206,12 +248,12 @@ func loadData() {
 
 func saveStudentProfiles() {
 	data, _ := json.MarshalIndent(studentProfiles, "", "  ")
-	os.WriteFile("profiles.json", data, 0644)
+	os.WriteFile(dataPath("profiles.json"), data, 0o644)
 }
 
 func saveConfig() {
 	data, _ := json.MarshalIndent(globalConfig, "", "  ")
-	os.WriteFile("config.json", data, 0644)
+	os.WriteFile(dataPath("config.json"), data, 0o644)
 }
 
 // Cookie Helper
@@ -312,7 +354,7 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Cookie", cookieHeader)
-	
+
 	if strings.Contains(strings.ToLower(userAgent), "firefox") {
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
@@ -341,12 +383,275 @@ func makeRequest(client tls_client.HttpClient, targetUrl string, cookieHeader st
 
 // Cookie Refresh via Python headless browser
 type RefreshResult struct {
-	Status     string `json:"status"`
-	NIM        string `json:"nim"`
-	Name       string `json:"name"`
+	Status      string `json:"status"`
+	NIM         string `json:"nim"`
+	Name        string `json:"name"`
 	CookiesJSON string `json:"cookies_json"`
-	UserAgent  string `json:"user_agent"`
-	Error      string `json:"error"`
+	UserAgent   string `json:"user_agent"`
+	Error       string `json:"error"`
+}
+
+// isServerRefreshDisabled bernilai true jika server sengaja tidak boleh login
+// sendiri (karena IP Azure diblokir Cloudflare) dan harus menunggu cookie donor.
+func isServerRefreshDisabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("DISABLE_SERVER_REFRESH")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+// looksLikeCloudflareBlock mendeteksi pesan error yang berasal dari challenge Cloudflare.
+func looksLikeCloudflareBlock(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, keyword := range []string{"cloudflare", "just a moment", "challenge", "turnstile"} {
+		if strings.Contains(m, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeProfileResult menyimpan hasil eksekusi bot ke profil di database.
+// Jika cookie di database lebih baru (mis. baru saja di-push laptop donor),
+// cookie lama dari hasil eksekusi TIDAK boleh menimpanya.
+func mergeProfileResult(target *Profile, result *Profile) {
+	if target.CookieUpdatedAt.After(result.CookieUpdatedAt) {
+		result.CookiesJSON = target.CookiesJSON
+		result.CookieUpdatedAt = target.CookieUpdatedAt
+		if target.Name != "" {
+			result.Name = target.Name
+		}
+		result.FailedCount = target.FailedCount
+		result.LastRunStatus = target.LastRunStatus
+		result.LastRunMsg = target.LastRunMsg
+		result.LastRunTime = target.LastRunTime
+	}
+	*target = *result
+}
+
+const failureAlertThreshold = 10
+
+// normalizePhoneNumber mengubah 08xx/8xx menjadi format 62xx yang dipakai Fonnte.
+func normalizePhoneNumber(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	number := b.String()
+	if number == "" {
+		return ""
+	}
+	if strings.HasPrefix(number, "0") {
+		return "62" + number[1:]
+	}
+	if strings.HasPrefix(number, "8") {
+		return "62" + number
+	}
+	return number
+}
+
+// sendFailureAlert mengirim pengingat WA satu kali saat profil otomatis dihentikan.
+func sendFailureAlert(nim, name, fallbackToken string) {
+	configMutex.RLock()
+	number := normalizePhoneNumber(globalConfig.WAAlertNumber)
+	token := globalConfig.WAToken
+	configMutex.RUnlock()
+
+	if token == "" {
+		token = fallbackToken
+	}
+
+	if number == "" {
+		AddLog("warning", "Pengingat WA tidak dikirim: nomor WA pengingat belum diatur di Pengaturan Global.")
+		return
+	}
+	if token == "" {
+		AddLog("warning", "Pengingat WA tidak dikirim: WhatsApp Token (Fonnte) global belum diatur.")
+		return
+	}
+	if name == "" {
+		name = "Tanpa Nama"
+	}
+
+	loc := time.FixedZone("WIB", 7*60*60)
+	waktu := time.Now().In(loc).Format("02/01/2006 15:04 WIB")
+	pesan := fmt.Sprintf(
+		"⚠️ BOT PRESENSI DIHENTIKAN SEMENTARA\n\n"+
+			"Akun: %s (%s)\n"+
+			"Bot gagal mengecek presensi %d kali berturut-turut.\n"+
+			"Kemungkinan cookie/sesi sudah kedaluwarsa atau diblokir Cloudflare.\n\n"+
+			"Bot akun ini berhenti sementara sampai cookie baru diberikan.\n"+
+			"Silakan perbarui cookie lewat dashboard atau jalankan cookie donor dari laptop.\n\n"+
+			"Waktu: %s",
+		name, nim, failureAlertThreshold, waktu,
+	)
+
+	AddLog("system", "📨 Mengirim pengingat WA ke %s untuk NIM %s...", number, nim)
+	sendWhatsApp(pesan, token, number)
+}
+
+// claimFailureAlert menandai pengingat sudah terkirim secara atomik di database,
+// sehingga pengingat tidak pernah terkirim dua kali walau ada run bersamaan.
+func claimFailureAlert(nim string) bool {
+	studentProfilesMutex.Lock()
+	defer studentProfilesMutex.Unlock()
+	for i := range studentProfiles {
+		if studentProfiles[i].NIM == nim {
+			if studentProfiles[i].FailureAlertSent {
+				return false
+			}
+			studentProfiles[i].FailureAlertSent = true
+			return true
+		}
+	}
+	return false
+}
+
+// maybePauseAfterFailures menghentikan sementara profil yang gagal 10 kali
+// dan mengirim pengingat WA satu kali. Profil aktif kembali saat cookie baru masuk.
+func maybePauseAfterFailures(p *Profile) {
+	if p.Paused || p.FailedCount < failureAlertThreshold {
+		return
+	}
+
+	p.Paused = true
+	p.PauseReason = fmt.Sprintf("Dihentikan sementara setelah %d kali gagal mengecek presensi. Menunggu cookie baru.", p.FailedCount)
+	p.LastRunStatus = "paused"
+	p.LastRunMsg = p.PauseReason
+
+	AddLog("error", "⛔ NIM %s (%s): %s", p.NIM, p.Name, p.PauseReason)
+
+	if p.FailureAlertSent {
+		return
+	}
+
+	configMutex.RLock()
+	hasNumber := normalizePhoneNumber(globalConfig.WAAlertNumber) != ""
+	hasToken := strings.TrimSpace(globalConfig.WAToken) != "" || strings.TrimSpace(p.WAToken) != ""
+	configMutex.RUnlock()
+	if !hasNumber {
+		AddLog("warning", "NIM %s: Nomor WA pengingat belum diisi di Pengaturan Global.", p.NIM)
+		return
+	}
+	if !hasToken {
+		AddLog("warning", "NIM %s: WhatsApp Token (Fonnte) global belum diisi, pengingat tidak dikirim.", p.NIM)
+		return
+	}
+
+	if !claimFailureAlert(p.NIM) {
+		return
+	}
+	p.FailureAlertSent = true
+	go sendFailureAlert(p.NIM, p.Name, p.WAToken)
+}
+
+// markRefreshFailure menentukan status profil saat auto-refresh gagal.
+func markRefreshFailure(p *Profile, prefix string, err error) {
+	switch {
+	case looksLikeCloudflareBlock(err.Error()):
+		p.LastRunStatus = "needs_cookie"
+		p.LastRunMsg = fmt.Sprintf("%s: Cloudflare memblokir IP server, menunggu cookie baru dari laptop donor (%v)", prefix, err)
+	case isServerRefreshDisabled():
+		p.LastRunStatus = "needs_cookie"
+		p.LastRunMsg = fmt.Sprintf("%s: auto-refresh server dinonaktifkan, menunggu cookie dari laptop donor (%v)", prefix, err)
+	default:
+		p.LastRunStatus = "expired"
+		p.LastRunMsg = fmt.Sprintf("%s: %v", prefix, err)
+	}
+}
+
+// pushToken mengembalikan token untuk endpoint /api/cookies/push.
+func pushToken() string {
+	return strings.TrimSpace(os.Getenv("COOKIE_PUSH_TOKEN"))
+}
+
+// checkPushToken memvalidasi header X-Push-Token atau Bearer token.
+func checkPushToken(r *nethttp.Request) bool {
+	expected := pushToken()
+	if expected == "" {
+		return false
+	}
+	got := strings.TrimSpace(r.Header.Get("X-Push-Token"))
+	if got == "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+			got = strings.TrimSpace(auth[7:])
+		}
+	}
+	if got == "" {
+		// Dukungan query string untuk kemudahan pemakaian dari browser/curl.
+		got = strings.TrimSpace(r.URL.Query().Get("token"))
+	}
+	// Perbandingan sederhana; token ini hanya untuk relay cookie milik sendiri.
+	return got == expected
+}
+
+// normalizeCookiesJSON menerima cookies_json dalam beberapa bentuk:
+// string JSON, objek {user_agent, cookies}, atau array cookie.
+func normalizeCookiesJSON(raw json.RawMessage, userAgent string) (string, error) {
+	if len(raw) == 0 {
+		return "", fmt.Errorf("cookies_json wajib diisi")
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", fmt.Errorf("cookies_json wajib diisi")
+	}
+
+	// Bentuk paling umum: string JSON.
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		asString = strings.TrimSpace(asString)
+		if asString == "" {
+			return "", fmt.Errorf("cookies_json kosong")
+		}
+		if header, _ := parseCookies(asString); header == "" {
+			return "", fmt.Errorf("format cookies_json tidak dikenali")
+		}
+		return asString, nil
+	}
+
+	// Objek {user_agent, cookies:[...]}.
+	if strings.HasPrefix(trimmed, "{") {
+		var obj struct {
+			UserAgent string          `json:"user_agent"`
+			Cookies   json.RawMessage `json:"cookies"`
+		}
+		if err := json.Unmarshal(raw, &obj); err == nil && len(obj.Cookies) > 0 {
+			ua := obj.UserAgent
+			if ua == "" {
+				ua = userAgent
+			}
+			if ua == "" {
+				ua = USER_AGENT
+			}
+			wrapped, _ := json.Marshal(map[string]interface{}{
+				"user_agent": ua,
+				"cookies":    obj.Cookies,
+			})
+			if header, _ := parseCookies(string(wrapped)); header == "" {
+				return "", fmt.Errorf("daftar cookies kosong/tidak valid")
+			}
+			return string(wrapped), nil
+		}
+	}
+
+	// Array cookie.
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []CookieItem
+		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+			ua := userAgent
+			if ua == "" {
+				ua = USER_AGENT
+			}
+			wrapped, _ := json.Marshal(map[string]interface{}{
+				"user_agent": ua,
+				"cookies":    arr,
+			})
+			return string(wrapped), nil
+		}
+	}
+
+	return "", fmt.Errorf("format cookies_json tidak dikenali")
 }
 
 func encodePassword(plain string) string {
@@ -365,6 +670,12 @@ func refreshCookies(p *Profile) error {
 	password := decodePassword(p.Password)
 	if p.NIM == "" || password == "" {
 		return fmt.Errorf("NIM atau Password kosong, tidak bisa auto-refresh cookie")
+	}
+
+	// Mode "donor": server tidak mencoba login sendiri karena IP-nya diblokir Cloudflare.
+	// Cookie baru dikirim oleh laptop lewat endpoint /api/cookies/push.
+	if isServerRefreshDisabled() {
+		return fmt.Errorf("auto-refresh browser di server dinonaktifkan (DISABLE_SERVER_REFRESH=1). Menunggu cookie baru dari laptop donor")
 	}
 
 	AddLog("system", "🔄 NIM %s: Memulai auto-refresh cookie via headless browser...", p.NIM)
@@ -442,12 +753,16 @@ func refreshCookies(p *Profile) error {
 
 	// Update profile with new cookies
 	p.CookiesJSON = result.CookiesJSON
+	p.CookieUpdatedAt = time.Now()
 	if result.Name != "" && result.Name != "Unknown" {
 		p.Name = result.Name
 	}
 	p.FailedCount = 0
+	p.Paused = false
+	p.PauseReason = ""
+	p.FailureAlertSent = false
 	p.LastRunStatus = ""
-	p.LastRunMsg = "Cookie berhasil di-refresh otomatis!"
+	p.LastRunMsg = "Cookie berhasil di-refresh otomatis! Bot diaktifkan kembali."
 
 	AddLog("success", "🎉 NIM %s: Cookie berhasil di-refresh! Sesi baru aktif.", p.NIM)
 
@@ -554,8 +869,7 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 				AddLog("system", "NIM %s: Mencoba auto-refresh cookie...", p.NIM)
 				if err := refreshCookies(p); err != nil {
 					AddLog("error", "NIM %s: Auto-refresh gagal: %v", p.NIM, err)
-					p.LastRunStatus = "expired"
-					p.LastRunMsg = fmt.Sprintf("Cookie expired & auto-refresh gagal: %v", err)
+					markRefreshFailure(p, "Cookie expired & auto-refresh gagal", err)
 				} else {
 					// Retry once with new cookies
 					AddLog("info", "NIM %s: Mencoba ulang presensi dengan cookie baru...", p.NIM)
@@ -584,8 +898,7 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 				AddLog("system", "NIM %s: Mencoba auto-refresh cookie...", p.NIM)
 				if err := refreshCookies(p); err != nil {
 					AddLog("error", "NIM %s: Auto-refresh gagal: %v", p.NIM, err)
-					p.LastRunStatus = "expired"
-					p.LastRunMsg = fmt.Sprintf("Sesi expired & auto-refresh gagal: %v", err)
+					markRefreshFailure(p, "Sesi expired & auto-refresh gagal", err)
 				} else {
 					// Retry once with new cookies
 					AddLog("info", "NIM %s: Mencoba ulang presensi dengan cookie baru...", p.NIM)
@@ -841,12 +1154,22 @@ func runBotForProfile(p *Profile) []CourseSuccess {
 func runBotForAllActive() {
 	studentProfilesMutex.RLock()
 	var activeProfiles []Profile
+	pausedCount := 0
 	for _, p := range studentProfiles {
-		if p.IsActive {
-			activeProfiles = append(activeProfiles, p)
+		if !p.IsActive {
+			continue
 		}
+		if p.Paused {
+			pausedCount++
+			continue
+		}
+		activeProfiles = append(activeProfiles, p)
 	}
 	studentProfilesMutex.RUnlock()
+
+	if pausedCount > 0 {
+		AddLog("info", "⏸️ %d akun dilewati karena dihentikan sementara (menunggu cookie baru).", pausedCount)
+	}
 
 	if len(activeProfiles) == 0 {
 		AddLog("info", "Tidak ada akun aktif dalam scheduler.")
@@ -865,6 +1188,7 @@ func runBotForAllActive() {
 
 			p := &activeProfiles[idx]
 			successes := runBotForProfile(p)
+			maybePauseAfterFailures(p)
 
 			// Resolve WA configurations
 			waToken := p.WAToken
@@ -896,9 +1220,9 @@ func runBotForAllActive() {
 
 			// Update state in db
 			studentProfilesMutex.Lock()
-			for j, dbP := range studentProfiles {
-				if dbP.NIM == p.NIM {
-					studentProfiles[j] = *p
+			for j := range studentProfiles {
+				if studentProfiles[j].NIM == p.NIM {
+					mergeProfileResult(&studentProfiles[j], p)
 					break
 				}
 			}
@@ -963,6 +1287,9 @@ func runBotForAllActive() {
 
 // Ping Keep-Alive agar sesi PHP cookie tetap aktif dan tidak kedaluwarsa
 func pingKeepAliveForProfile(p *Profile) {
+	if p.Paused {
+		return
+	}
 	cookieHeader, userAgent := parseCookies(p.CookiesJSON)
 	if cookieHeader == "" {
 		return
@@ -1035,7 +1362,7 @@ func pingKeepAliveForAllActive() {
 
 	var wg sync.WaitGroup
 	for i := range profilesCopy {
-		if !profilesCopy[i].IsActive {
+		if !profilesCopy[i].IsActive || profilesCopy[i].Paused {
 			continue
 		}
 		wg.Add(1)
@@ -1111,6 +1438,13 @@ func main() {
 	AddLog("system", "Inisialisasi sistem basis data bot...")
 	loadData()
 
+	if pushToken() != "" {
+		AddLog("system", "Mode donor aktif: endpoint /api/cookies/push siap menerima cookie dari laptop.")
+	}
+	if isServerRefreshDisabled() {
+		AddLog("system", "Auto-refresh browser di server DINONAKTIFKAN (DISABLE_SERVER_REFRESH=1). Server menunggu cookie dari laptop donor.")
+	}
+
 	AddLog("system", "Memulai scheduler pengecekan latar belakang...")
 	startScheduler()
 
@@ -1168,9 +1502,32 @@ func main() {
 					if newP.Password == "" {
 						newP.Password = p.Password
 					}
-					// Keep existing cookies if not provided
-					if newP.CookiesJSON == "" {
+
+					// Pertahankan status penghentian & pengingat dari data lama.
+					newP.Paused = p.Paused
+					newP.PauseReason = p.PauseReason
+					newP.FailureAlertSent = p.FailureAlertSent
+					newP.FailedCount = p.FailedCount
+
+					incomingCookies := strings.TrimSpace(newP.CookiesJSON)
+					oldCookies := strings.TrimSpace(p.CookiesJSON)
+					switch {
+					case incomingCookies == "":
+						// Cookie tidak dikirim: pakai cookie lama.
 						newP.CookiesJSON = p.CookiesJSON
+						newP.CookieUpdatedAt = p.CookieUpdatedAt
+					case incomingCookies == oldCookies:
+						// Cookie sama (mis. hanya edit nama): jangan reset pause.
+						newP.CookieUpdatedAt = p.CookieUpdatedAt
+					default:
+						// Cookie benar-benar berubah → aktifkan kembali bot.
+						newP.CookieUpdatedAt = time.Now()
+						newP.FailedCount = 0
+						newP.Paused = false
+						newP.PauseReason = ""
+						newP.FailureAlertSent = false
+						newP.LastRunStatus = ""
+						newP.LastRunMsg = "Cookie baru disimpan lewat dashboard. Bot diaktifkan kembali."
 					}
 					studentProfiles[i] = newP
 					found = true
@@ -1178,6 +1535,9 @@ func main() {
 				}
 			}
 			if !found {
+				if strings.TrimSpace(newP.CookiesJSON) != "" {
+					newP.CookieUpdatedAt = time.Now()
+				}
 				studentProfiles = append(studentProfiles, newP)
 			}
 			saveStudentProfiles()
@@ -1295,8 +1655,14 @@ func main() {
 					pCopy := studentProfiles[targetIdx]
 					studentProfilesMutex.Unlock()
 
+					if pCopy.Paused {
+						AddLog("warning", "⏸️ NIM %s: Dilewati karena dihentikan sementara. Berikan cookie baru untuk mengaktifkan kembali.", pCopy.NIM)
+						return
+					}
+
 					AddLog("system", "Menjalankan paksa bot presensi NIM %s...", pCopy.NIM)
 					successes := runBotForProfile(&pCopy)
+					maybePauseAfterFailures(&pCopy)
 
 					// Send WA immediately for manual runs
 					if len(successes) > 0 {
@@ -1324,7 +1690,12 @@ func main() {
 					}
 
 					studentProfilesMutex.Lock()
-					studentProfiles[targetIdx] = pCopy
+					for i := range studentProfiles {
+						if studentProfiles[i].NIM == pCopy.NIM {
+							mergeProfileResult(&studentProfiles[i], &pCopy)
+							break
+						}
+					}
 					studentProfilesMutex.Unlock()
 					saveStudentProfiles()
 				} else {
@@ -1387,14 +1758,13 @@ func main() {
 
 			if err := refreshCookies(&pCopy); err != nil {
 				AddLog("error", "NIM %s: Refresh cookie gagal: %v", pCopy.NIM, err)
-				pCopy.LastRunStatus = "failed"
-				pCopy.LastRunMsg = fmt.Sprintf("Refresh cookie manual gagal: %v", err)
+				markRefreshFailure(&pCopy, "Refresh cookie manual gagal", err)
 			}
 
 			studentProfilesMutex.Lock()
-			for i, p := range studentProfiles {
-				if p.NIM == pCopy.NIM {
-					studentProfiles[i] = pCopy
+			for i := range studentProfiles {
+				if studentProfiles[i].NIM == pCopy.NIM {
+					mergeProfileResult(&studentProfiles[i], &pCopy)
 					break
 				}
 			}
@@ -1405,6 +1775,189 @@ func main() {
 		w.WriteHeader(nethttp.StatusOK)
 		w.Write([]byte("refresh_triggered"))
 	})))
+
+	// API: Push cookie dari laptop (donor) ke server
+	// Dipakai ketika IP server (Azure) diblokir Cloudflare, sehingga login
+	// dilakukan di laptop yang IP-nya bersih lalu cookie dikirim ke sini.
+	nethttp.Handle("/api/cookies/push", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Push-Token, Authorization")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+		if r.Method != nethttp.MethodPost {
+			nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+			return
+		}
+		if pushToken() == "" {
+			nethttp.Error(w, "Endpoint push belum aktif. Set env COOKIE_PUSH_TOKEN terlebih dahulu.", nethttp.StatusServiceUnavailable)
+			return
+		}
+		if !checkPushToken(r) {
+			nethttp.Error(w, "Token push salah atau tidak dikirim.", nethttp.StatusUnauthorized)
+			return
+		}
+
+		var payload struct {
+			NIM         string          `json:"nim"`
+			CookiesJSON json.RawMessage `json:"cookies_json"`
+			UserAgent   string          `json:"user_agent"`
+			Name        string          `json:"name"`
+			Source      string          `json:"source"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			nethttp.Error(w, "Body JSON tidak valid: "+err.Error(), nethttp.StatusBadRequest)
+			return
+		}
+
+		nim := strings.TrimSpace(payload.NIM)
+		if nim == "" {
+			nethttp.Error(w, "NIM wajib diisi", nethttp.StatusBadRequest)
+			return
+		}
+
+		cookiesJSON, err := normalizeCookiesJSON(payload.CookiesJSON, strings.TrimSpace(payload.UserAgent))
+		if err != nil {
+			nethttp.Error(w, err.Error(), nethttp.StatusBadRequest)
+			return
+		}
+
+		source := strings.TrimSpace(payload.Source)
+		if source == "" {
+			source = "laptop-donor"
+		}
+
+		studentProfilesMutex.Lock()
+		idx := -1
+		for i := range studentProfiles {
+			if strings.EqualFold(studentProfiles[i].NIM, nim) {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			studentProfilesMutex.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(nethttp.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "NIM " + nim + " belum terdaftar di dashboard server"})
+			return
+		}
+
+		p := &studentProfiles[idx]
+		p.CookiesJSON = cookiesJSON
+		if name := strings.TrimSpace(payload.Name); name != "" && name != "Unknown" {
+			p.Name = name
+		}
+		p.FailedCount = 0
+		p.Paused = false
+		p.PauseReason = ""
+		p.FailureAlertSent = false
+		p.LastRunStatus = ""
+		p.LastRunMsg = fmt.Sprintf("Cookie baru diterima dari %s. Bot diaktifkan kembali.", source)
+		p.CookieUpdatedAt = time.Now()
+		savedNIM := p.NIM
+		savedName := p.Name
+		saveStudentProfiles()
+		studentProfilesMutex.Unlock()
+
+		// Buang cache TLS client lama agar user-agent/cookie baru langsung dipakai.
+		clientCacheMu.Lock()
+		delete(clientCache, savedNIM)
+		clientCacheMu.Unlock()
+
+		AddLog("success", "🍪 NIM %s (%s): Cookie baru diterima dari %s.", savedNIM, savedName, source)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "nim": savedNIM})
+	}))
+
+	// API: Daftar profil yang butuh cookie baru (dipoll oleh laptop donor)
+	nethttp.Handle("/api/cookies/needs-refresh", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Push-Token, Authorization")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+		if r.Method != nethttp.MethodGet {
+			nethttp.Error(w, "Method not allowed", nethttp.StatusMethodNotAllowed)
+			return
+		}
+		if pushToken() == "" {
+			nethttp.Error(w, "Endpoint push belum aktif. Set env COOKIE_PUSH_TOKEN terlebih dahulu.", nethttp.StatusServiceUnavailable)
+			return
+		}
+		if !checkPushToken(r) {
+			nethttp.Error(w, "Token push salah atau tidak dikirim.", nethttp.StatusUnauthorized)
+			return
+		}
+
+		includeAll := strings.EqualFold(r.URL.Query().Get("all"), "1") || strings.EqualFold(r.URL.Query().Get("all"), "true")
+
+		type NeedItem struct {
+			NIM             string    `json:"nim"`
+			Name            string    `json:"name"`
+			Status          string    `json:"last_run_status"`
+			Message         string    `json:"last_run_msg"`
+			FailedCount     int       `json:"failed_count"`
+			LastRunTime     time.Time `json:"last_run_time"`
+			CookieUpdatedAt time.Time `json:"cookie_updated_at"`
+			CookieAgeHours  float64   `json:"cookie_age_hours"`
+		}
+
+		// Refresh proaktif sebelum cookie benar-benar mati.
+		// Bisa diatur lewat env COOKIE_MAX_AGE_HOURS (0 = nonaktifkan).
+		maxAgeHours := 6.0
+		if raw := strings.TrimSpace(os.Getenv("COOKIE_MAX_AGE_HOURS")); raw != "" {
+			if v, err := strconv.ParseFloat(raw, 64); err == nil {
+				maxAgeHours = v
+			}
+		}
+
+		studentProfilesMutex.RLock()
+		items := make([]NeedItem, 0)
+		nims := make([]string, 0)
+		for _, p := range studentProfiles {
+			if !p.IsActive || p.Password == "" {
+				continue
+			}
+			cookieAge := 0.0
+			if !p.CookieUpdatedAt.IsZero() {
+				cookieAge = time.Since(p.CookieUpdatedAt).Hours()
+			}
+			stale := maxAgeHours > 0 && (p.CookieUpdatedAt.IsZero() || cookieAge > maxAgeHours)
+
+			needs := includeAll || stale || p.Paused ||
+				p.LastRunStatus == "expired" ||
+				p.LastRunStatus == "failed" ||
+				p.LastRunStatus == "needs_cookie" ||
+				p.LastRunStatus == "paused" ||
+				p.FailedCount > 0
+			if needs {
+				items = append(items, NeedItem{
+					NIM:             p.NIM,
+					Name:            p.Name,
+					Status:          p.LastRunStatus,
+					Message:         p.LastRunMsg,
+					FailedCount:     p.FailedCount,
+					LastRunTime:     p.LastRunTime,
+					CookieUpdatedAt: p.CookieUpdatedAt,
+					CookieAgeHours:  math.Round(cookieAge*10) / 10,
+				})
+				nims = append(nims, p.NIM)
+			}
+		}
+		studentProfilesMutex.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"nims":     nims,
+			"profiles": items,
+		})
+	}))
 
 	// API: Export backup
 	nethttp.Handle("/api/export", basicAuthMiddleware(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {

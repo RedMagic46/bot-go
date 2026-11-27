@@ -4,6 +4,7 @@ let state = {
     config: {
         wa_token: '',
         wa_group: '',
+        wa_alert_number: '',
         check_interval: 5,
         start_hour: 7,
         end_hour: 21
@@ -88,9 +89,11 @@ function renderProfiles() {
     }
 
     profilesList.innerHTML = state.profiles.map(p => {
-        const activeBadge = p.is_active 
-            ? `<span class="badge badge-success">Aktif</span>` 
-            : `<span class="badge badge-muted">Nonaktif</span>`;
+        const activeBadge = p.paused
+            ? `<span class="badge badge-warning">Jeda</span>`
+            : (p.is_active 
+                ? `<span class="badge badge-success">Aktif</span>` 
+                : `<span class="badge badge-muted">Nonaktif</span>`);
             
         let statusBadge = `<span class="badge badge-muted">Belum Cek</span>`;
         if (p.last_run_status === 'success') {
@@ -101,6 +104,10 @@ function renderProfiles() {
             statusBadge = `<span class="badge badge-info">Tidak Ada Matkul Aktif</span>`;
         } else if (p.last_run_status === 'expired') {
             statusBadge = `<span class="badge badge-warning">Cookie Expired</span>`;
+        } else if (p.last_run_status === 'needs_cookie') {
+            statusBadge = `<span class="badge badge-warning" title="${p.last_run_msg || ''}">Menunggu Cookie Laptop</span>`;
+        } else if (p.paused || p.last_run_status === 'paused') {
+            statusBadge = `<span class="badge badge-danger" title="${p.pause_reason || p.last_run_msg || ''}">Dihentikan Sementara</span>`;
         } else if (p.last_run_status === 'refreshing') {
             statusBadge = `<span class="badge badge-info" style="animation: pulse 1.5s infinite;">Refreshing Cookie...</span>`;
         }
@@ -155,6 +162,7 @@ function renderProfiles() {
 function renderConfig() {
     document.getElementById('cfg-wa-token').value = state.config.wa_token || '';
     document.getElementById('cfg-wa-group').value = state.config.wa_group || '';
+    document.getElementById('cfg-wa-alert').value = state.config.wa_alert_number || '';
     document.getElementById('cfg-interval').value = state.config.check_interval || 5;
     document.getElementById('cfg-start-hour').value = state.config.start_hour !== undefined ? state.config.start_hour : 7;
     document.getElementById('cfg-end-hour').value = state.config.end_hour !== undefined ? state.config.end_hour : 21;
@@ -199,6 +207,7 @@ async function saveGlobalConfig() {
     const config = {
         wa_token: document.getElementById('cfg-wa-token').value,
         wa_group: document.getElementById('cfg-wa-group').value,
+        wa_alert_number: document.getElementById('cfg-wa-alert').value,
         check_interval: parseInt(document.getElementById('cfg-interval').value) || 5,
         start_hour: parseInt(document.getElementById('cfg-start-hour').value) || 7,
         end_hour: parseInt(document.getElementById('cfg-end-hour').value) || 21

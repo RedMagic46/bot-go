@@ -1,0 +1,15 @@
+# Jangan pernah bake kredensial / sesi ke image
+profiles.json
+config.json
+donor.env
+.env
+.env.local
+.donor_profiles/
+__pycache__/
+*.pyc
+
+# Artefak lokal
+*.exe
+*.exe~
+.git/
+.gitignore

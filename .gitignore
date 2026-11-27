@@ -5,6 +5,13 @@ config.json
 # Local env files
 .env
 .env.local
+donor.env*
+
+local_cookie_donor.py
+login_profiles.py
+
+
+.donor_profiles/
 
 # Compiled binaries
 bot-presensi
@@ -14,3 +21,5 @@ bot-presensi.exe
 *.dll
 *.so
 *.dylib
+*.bat
+*.vbs
