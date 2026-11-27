@@ -23,8 +23,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pastikan browser firefox versi 1.49.0 terpasang
-RUN python -m playwright install firefox
+# Pastikan browser chromium dan firefox versi 1.49.0 terpasang
+RUN python -m playwright install chromium firefox
 
 # Salin hasil kompilasi Go binary dari tahap builder
 COPY --from=builder /app/bot-presensi .

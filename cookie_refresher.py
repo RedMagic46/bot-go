@@ -99,27 +99,54 @@ async def run(nim, password):
     url_profil = "https://infokhs.umm.ac.id/profil"
 
     from playwright.async_api import async_playwright
-    from playwright_stealth import Stealth
 
     pw_context = async_playwright()
     pw = await pw_context.__aenter__()
 
-    # Hook stealth at playwright level
-    stealth = Stealth()
-    stealth.hook_playwright_context(pw)
-
     browser = None
     try:
-        log("Meluncurkan Firefox headless...")
         proxy_url = os.environ.get("PROXY_URL", "")
         launch_opts = {"headless": True}
         if proxy_url:
             launch_opts["proxy"] = {"server": proxy_url}
             log(f"Menggunakan proxy: {proxy_url}")
-        browser = await pw.firefox.launch(**launch_opts)
-        firefox_132_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
-        context = await browser.new_context(user_agent=firefox_132_ua)
-        page = await context.new_page()
+
+        page = None
+        context = None
+        # Coba Chromium dengan stealth terlebih dahulu (paling stabil di Docker Linux)
+        try:
+            log("Meluncurkan Chromium headless...")
+            args = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ]
+            browser = await pw.chromium.launch(args=args, **launch_opts)
+            chrome_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            context = await browser.new_context(user_agent=chrome_ua, viewport={"width": 1280, "height": 720})
+            page = await context.new_page()
+
+            # Terapkan stealth khusus ke Chromium page (bukan global hook yang merusak Firefox)
+            try:
+                from playwright_stealth import Stealth
+                stealth = Stealth()
+                await stealth.apply_stealth_async(page)
+                log("Stealth mode aktif pada Chromium.")
+            except Exception as se:
+                log(f"Warning stealth: {se}")
+
+        except Exception as ce:
+            log(f"Chromium gagal ({ce}), mencoba Firefox...")
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            browser = await pw.firefox.launch(**launch_opts)
+            firefox_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
+            context = await browser.new_context(user_agent=firefox_ua, viewport={"width": 1280, "height": 720})
+            page = await context.new_page()
 
         log(f"Membuka halaman login: {url_login}")
         try:
