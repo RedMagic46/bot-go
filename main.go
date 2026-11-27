@@ -109,6 +109,9 @@ type CachedClient struct {
 var (
 	clientCache   = make(map[string]CachedClient)
 	clientCacheMu sync.Mutex
+
+	pausedLogMu     sync.Mutex
+	lastPausedCount = -1
 )
 
 // Log System
@@ -1167,12 +1170,20 @@ func runBotForAllActive() {
 	}
 	studentProfilesMutex.RUnlock()
 
-	if pausedCount > 0 {
+	pausedLogMu.Lock()
+	prevPausedCount := lastPausedCount
+	lastPausedCount = pausedCount
+	pausedLogMu.Unlock()
+	if pausedCount > 0 && pausedCount != prevPausedCount {
 		AddLog("info", "⏸️ %d akun dilewati karena dihentikan sementara (menunggu cookie baru).", pausedCount)
+	} else if pausedCount == 0 && prevPausedCount > 0 {
+		AddLog("success", "▶️ Semua akun aktif kembali setelah cookie baru diterima.")
 	}
 
 	if len(activeProfiles) == 0 {
-		AddLog("info", "Tidak ada akun aktif dalam scheduler.")
+		if pausedCount == 0 {
+			AddLog("info", "Tidak ada akun aktif dalam scheduler.")
+		}
 		return
 	}
 
